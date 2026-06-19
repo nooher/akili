@@ -10,6 +10,10 @@ export type AkiliDomain =
   | 'afya' //  health / clinical (TibaAI)
   | 'fasihi' //  literature / reading / poetry (Kasuku)
   | 'lugha' //  Kiswahili language: grammar, translate, pronounce (Kasuku)
+  | 'sheria' //  Tanzanian law & civic rights basics
+  | 'kilimo' //  agriculture for smallholder farmers
+  | 'elimu' //  study help / education system
+  | 'biashara' //  small business & financial literacy
   | 'snil' //  SNIL-as-tool: Swahili intent → code → execution
   | 'jumla'; //  general / about-Akili / fallback
 
