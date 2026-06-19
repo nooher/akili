@@ -53,6 +53,32 @@ npm test         # vitest
 npm run build
 ```
 
+## Long-term memory (Laetoli Data) — optional, OFF by default
+
+Akili remembers your conversation in the browser (localStorage) and **stays
+fully offline by default**. You can optionally give it *long-term vector memory*
+backed by [Laetoli Data](https://github.com/nooher/laetoli-data) — every turn is
+embedded with a sovereign **local** embedder (`src/lib/embed.ts`, deterministic
+384-dim feature hashing, no model/network) and stored as a `documents` row;
+before each answer Akili recalls (`hybrid_search`) the most relevant past turns.
+
+To turn it on, point Akili at a **running** Laetoli Data deployment via two
+build-time env vars (e.g. in `.env.local`):
+
+```bash
+VITE_AKILI_DATA_URL=https://your-laetoli-data.tz   # base URL of the deployment
+VITE_AKILI_DATA_ANON_KEY=your-anon-public-key       # its anon/public api key
+```
+
+With **neither** set, `getMemory()` returns the plain localStorage store and the
+app behaves exactly as before — no network, no Data dependency. The embedding is
+always computed locally, so even when Data is on, no model ever runs remotely.
+The vector dimension (384) matches Laetoli Data's default `documents.embedding`
+column, so the lexical embedder is swappable for a neural one later with no other
+change. (Akili vendors a tiny typed fetch client for Data's REST/RPC endpoints —
+see `src/lib/dataMemory.ts` — because `@laetoli/data` lives in the repo's
+`client/` subdir, which npm can't install via a git sub-path.)
+
 ## Use the engine directly
 ```ts
 import { askAkili } from './src/akili';

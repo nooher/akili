@@ -20,7 +20,8 @@ import {
   isWarningLine,
   toLines,
 } from './ui/format';
-import { createMemoryStore, type StoredMsg } from './lib/memory';
+import { type StoredMsg } from './lib/memory';
+import { getMemory, DataMemoryStore } from './lib/getMemory';
 import { loadMuted, saveMuted } from './lib/mute';
 import { useAsr, useTts } from './lib/useVoice';
 import { track } from './lib/telemetry';
@@ -51,7 +52,10 @@ const nextId = () => `m${++seq}-${Date.now().toString(36)}`;
 
 export function App() {
   // Persistence seam + in-memory multi-turn session live for the App's lifetime.
-  const storeRef = useRef(createMemoryStore());
+  // getMemory() returns the Laetoli-Data-backed store (long-term vector memory,
+  // mirrored to localStorage) when VITE_AKILI_DATA_URL + _ANON_KEY are set, else
+  // the plain localStorage store — so the app is unchanged + offline by default.
+  const storeRef = useRef(getMemory());
   const sessionRef = useRef<AkiliSession>(createAkiliSession(akili));
 
   const [messages, setMessages] = useState<Message[]>(
@@ -101,7 +105,26 @@ export function App() {
       setDraft('');
       setBusy(true);
       try {
-        const answer = await sessionRef.current.ask(text);
+        // Kumbukumbu (memory) recall: when long-term Laetoli Data memory is
+        // active, fetch the most relevant past turns and pass them to the engine
+        // as opaque query context. The engine consumes context without change;
+        // experts that don't use it simply ignore it. Best-effort + safe: any
+        // failure (or no matches) leaves the ask exactly as before.
+        const store = storeRef.current;
+        let context: Record<string, unknown> | undefined;
+        if (store instanceof DataMemoryStore) {
+          try {
+            const recalled = await store.recall(text);
+            if (recalled.length > 0) {
+              context = { kumbukumbu: recalled };
+            }
+          } catch {
+            /* recall is optional — never block answering */
+          }
+        }
+        const answer = await sessionRef.current.ask(
+          context ? { text, context } : text,
+        );
         setMessages((m) => [...m, { id: nextId(), role: 'akili', answer }]);
         speakAnswer(answer);
       } catch {
