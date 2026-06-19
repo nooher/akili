@@ -10,7 +10,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from 'react';
-import { askAkili } from './akili';
+import { akili, createAkiliSession, type AkiliSession } from './akili';
 import type { AkiliAnswer, AkiliDomain } from './akili/types';
 import {
   confidenceLabel,
@@ -20,25 +20,16 @@ import {
   isWarningLine,
   toLines,
 } from './ui/format';
+import { createMemoryStore, type StoredMsg } from './lib/memory';
+import { loadMuted, saveMuted } from './lib/mute';
+import { useAsr, useTts } from './lib/useVoice';
+import { track } from './lib/telemetry';
 
 // ── message model ─────────────────────────────────────────────────────────────
 
-interface UserMsg {
-  id: string;
-  role: 'user';
-  text: string;
-}
-interface AkiliMsg {
-  id: string;
-  role: 'akili';
-  answer: AkiliAnswer;
-}
-interface ErrorMsg {
-  id: string;
-  role: 'error';
-  text: string;
-}
-type Message = UserMsg | AkiliMsg | ErrorMsg;
+// The rendered message model is identical to the persisted one (see lib/memory),
+// so we reuse StoredMsg directly — the snapshot round-trips with zero mapping.
+type Message = StoredMsg;
 
 interface Starter {
   domain: AkiliDomain;
@@ -59,11 +50,31 @@ const nextId = () => `m${++seq}-${Date.now().toString(36)}`;
 // ── component ─────────────────────────────────────────────────────────────────
 
 export function App() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  // Persistence seam + in-memory multi-turn session live for the App's lifetime.
+  const storeRef = useRef(createMemoryStore());
+  const sessionRef = useRef<AkiliSession>(createAkiliSession(akili));
+
+  const [messages, setMessages] = useState<Message[]>(
+    // Restore a prior conversation from localStorage on first render. The engine
+    // session starts fresh (new turns rebuild context); the visible transcript is
+    // the source of truth that's persisted.
+    () => storeRef.current.load()?.messages ?? [],
+  );
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
+  const [muted, setMuted] = useState(() => loadMuted());
   const streamRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+
+  const tts = useTts();
+  const asr = useAsr();
+  const mutedRef = useRef(muted);
+  mutedRef.current = muted;
+
+  // Persist the transcript whenever it changes (debounced via React batching).
+  useEffect(() => {
+    storeRef.current.save(messages);
+  }, [messages]);
 
   // Keep the newest message in view.
   useEffect(() => {
@@ -71,17 +82,28 @@ export function App() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, busy]);
 
+  const speakAnswer = useCallback(
+    (answer: AkiliAnswer) => {
+      if (mutedRef.current || !tts.supported) return;
+      tts.speak(answer.text.sw);
+    },
+    [tts],
+  );
+
   const send = useCallback(
     async (raw: string) => {
       const text = raw.trim();
       if (!text || busy) return;
 
+      tts.cancel(); // stop any prior answer being spoken
+      asr.stop(); // close the mic if it was open
       setMessages((m) => [...m, { id: nextId(), role: 'user', text }]);
       setDraft('');
       setBusy(true);
       try {
-        const answer = await askAkili(text);
+        const answer = await sessionRef.current.ask(text);
         setMessages((m) => [...m, { id: nextId(), role: 'akili', answer }]);
+        speakAnswer(answer);
       } catch {
         setMessages((m) => [...m, { id: nextId(), role: 'error', text: ERROR_SW }]);
       } finally {
@@ -90,8 +112,44 @@ export function App() {
         requestAnimationFrame(() => taRef.current?.focus());
       }
     },
-    [busy],
+    [busy, tts, asr, speakAnswer],
   );
+
+  const onMic = useCallback(() => {
+    if (asr.listening) {
+      asr.stop();
+      return;
+    }
+    asr.start(
+      (finalText) => {
+        // Merge final transcript into the draft (append, trimmed).
+        setDraft((d) => (d.trim() ? `${d.trim()} ${finalText}` : finalText));
+        requestAnimationFrame(() => taRef.current?.focus());
+      },
+      (interim) => setDraft(interim),
+    );
+  }, [asr]);
+
+  const onToggleMute = useCallback(() => {
+    setMuted((prev) => {
+      const next = !prev;
+      saveMuted(next);
+      if (next) tts.cancel();
+      track('voice_mute_toggle', { muted: next });
+      return next;
+    });
+  }, [tts]);
+
+  const onNewChat = useCallback(() => {
+    tts.cancel();
+    asr.stop();
+    sessionRef.current.reset();
+    storeRef.current.clear();
+    setMessages([]);
+    setDraft('');
+    track('chat_reset', {});
+    requestAnimationFrame(() => taRef.current?.focus());
+  }, [tts, asr]);
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -109,7 +167,13 @@ export function App() {
 
   return (
     <div className="akili-app">
-      <Header />
+      <Header
+        ttsSupported={tts.supported}
+        muted={muted}
+        onToggleMute={onToggleMute}
+        canReset={!isEmpty}
+        onNewChat={onNewChat}
+      />
 
       <main className="akili-stream" ref={streamRef} aria-live="polite" aria-busy={busy}>
         <div className="akili-stream-inner">
@@ -119,7 +183,13 @@ export function App() {
             m.role === 'user' ? (
               <UserBubble key={m.id} text={m.text} />
             ) : m.role === 'akili' ? (
-              <AnswerCard key={m.id} answer={m.answer} />
+              <AnswerCard
+                key={m.id}
+                answer={m.answer}
+                ttsSupported={tts.supported}
+                muted={muted}
+                onSpeak={() => tts.speak(m.answer.text.sw)}
+              />
             ) : (
               <ErrorCard key={m.id} text={m.text} />
             ),
@@ -139,6 +209,9 @@ export function App() {
         showStarters={!isEmpty}
         starters={STARTERS}
         onStarter={(p) => void send(p)}
+        micSupported={asr.supported}
+        listening={asr.listening}
+        onMic={onMic}
       />
     </div>
   );
@@ -146,7 +219,15 @@ export function App() {
 
 // ── header ────────────────────────────────────────────────────────────────────
 
-function Header() {
+interface HeaderProps {
+  ttsSupported: boolean;
+  muted: boolean;
+  onToggleMute: () => void;
+  canReset: boolean;
+  onNewChat: () => void;
+}
+
+function Header({ ttsSupported, muted, onToggleMute, canReset, onNewChat }: HeaderProps) {
   return (
     <header className="akili-top">
       <div className="akili-brand">
@@ -156,7 +237,26 @@ function Header() {
           <p>AI ya Kiswahili · huru, bila mtandao</p>
         </div>
       </div>
-      <span className="akili-credit">Na Laetoli</span>
+      <div className="akili-top-actions">
+        {ttsSupported && (
+          <button
+            type="button"
+            className={`akili-iconbtn${muted ? ' is-active' : ''}`}
+            onClick={onToggleMute}
+            aria-pressed={muted}
+            title={muted ? 'Washa sauti' : 'Zima sauti'}
+          >
+            <span aria-hidden="true">{muted ? '🔇' : '🔊'}</span>
+            <span className="sr-only">{muted ? 'Washa sauti' : 'Zima sauti'}</span>
+          </button>
+        )}
+        {canReset && (
+          <button type="button" className="akili-newchat" onClick={onNewChat}>
+            Anza upya
+          </button>
+        )}
+        <span className="akili-credit">Na Laetoli</span>
+      </div>
     </header>
   );
 }
@@ -208,7 +308,14 @@ function UserBubble({ text }: { text: string }) {
   );
 }
 
-function AnswerCard({ answer }: { answer: AkiliAnswer }) {
+interface AnswerCardProps {
+  answer: AkiliAnswer;
+  ttsSupported: boolean;
+  muted: boolean;
+  onSpeak: () => void;
+}
+
+function AnswerCard({ answer, ttsSupported, muted, onSpeak }: AnswerCardProps) {
   const [showEn, setShowEn] = useState(false);
   const hasEn = Boolean(answer.text.en && answer.text.en.trim());
 
@@ -225,6 +332,16 @@ function AnswerCard({ answer }: { answer: AkiliAnswer }) {
           <span className={`pill pill--${answer.confidence}`}>
             {confidenceLabel(answer.confidence)}
           </span>
+          {ttsSupported && (
+            <button
+              type="button"
+              className="card-speak"
+              onClick={onSpeak}
+              title={muted ? 'Sauti imezimwa kwenye kichwa' : 'Sikiliza jibu hili'}
+            >
+              <span aria-hidden="true">🔊</span> Sikiliza
+            </button>
+          )}
         </header>
 
         <AnswerText text={answer.text.sw} />
@@ -338,6 +455,9 @@ interface ComposerProps {
   showStarters: boolean;
   starters: Starter[];
   onStarter: (p: string) => void;
+  micSupported: boolean;
+  listening: boolean;
+  onMic: () => void;
   ref: React.Ref<HTMLTextAreaElement>;
 }
 
@@ -350,6 +470,9 @@ function Composer({
   showStarters,
   starters,
   onStarter,
+  micSupported,
+  listening,
+  onMic,
   ref,
 }: ComposerProps) {
   return (
@@ -378,13 +501,28 @@ function Composer({
           id="akili-input"
           ref={ref}
           className="composer-input"
-          placeholder="Uliza Akili kwa Kiswahili…"
+          placeholder={listening ? 'Inasikiliza… sema kwa Kiswahili' : 'Uliza Akili kwa Kiswahili…'}
           rows={1}
           value={value}
           disabled={busy}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={onKeyDown}
         />
+        {micSupported && (
+          <button
+            type="button"
+            className={`composer-mic${listening ? ' is-listening' : ''}`}
+            onClick={onMic}
+            disabled={busy}
+            aria-pressed={listening}
+            title={listening ? 'Acha kusikiliza' : 'Ongea badala ya kuandika'}
+          >
+            <span aria-hidden="true">🎤</span>
+            <span className="sr-only">
+              {listening ? 'Acha kusikiliza' : 'Ongea badala ya kuandika'}
+            </span>
+          </button>
+        )}
         <button
           type="submit"
           className="composer-send"
@@ -395,6 +533,7 @@ function Composer({
       </form>
       <p className="composer-hint">
         Bonyeza <kbd>Enter</kbd> kutuma · <kbd>Shift</kbd>+<kbd>Enter</kbd> mstari mpya
+        {micSupported && <> · <kbd>🎤</kbd> ongea</>}
       </p>
     </div>
   );
