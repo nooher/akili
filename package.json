@@ -6,9 +6,9 @@
   "description": "Akili — Laetoli's sovereign Swahili AI: one brain that routes to domain experts (Afya/TibaAI, Fasihi+Lugha/Kasuku, SNIL-as-tool). No external LLM.",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && vite build --config vite.embed.config.ts",
     "build:embed": "vite build --config vite.embed.config.ts",
-    "build:all": "npm run build && npm run build:embed",
+    "build:all": "npm run build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -10,11 +10,20 @@ import { resolve } from 'node:path';
 // IIFE works dropped onto a non-React page, and CSS is inlined into the JS (the
 // widget injects its own <style>) so there is no separate .css to ship.
 //
-//   dist-embed/akili-widget.js        ES module  (import { mountAkili })
-//   dist-embed/akili-widget.umd.cjs   UMD        (CommonJS / AMD consumers)
-//   dist-embed/akili-widget.iife.js   IIFE       (<script> → window.Akili)
+//   dist/embed/akili-widget.js        ES module  (import { mountAkili })
+//   dist/embed/akili-widget.umd.cjs   UMD        (CommonJS / AMD consumers)
+//   dist/embed/akili-widget.iife.js   IIFE       (<script> → window.Akili)
 //
-// Build with:  npm run build:embed
+// The bundle is emitted INTO the served app output (`dist/embed/`) so that a
+// single Vercel `npm run build` (which runs `vite build` then this config)
+// publishes both the console app AND the widget at one origin — fetchable at
+//   https://akili-laetoli.vercel.app/embed/akili-widget.iife.js
+//
+// IMPORTANT: this config must run AFTER the main `vite build` (which clears
+// `dist/`), because we deliberately do NOT empty the output dir here — doing so
+// would wipe the freshly-built app. See the `build` script in package.json.
+//
+// Build standalone with:  npm run build:embed
 export default defineConfig({
   plugins: [react()],
   define: {
@@ -23,8 +32,12 @@ export default defineConfig({
     'process.env.NODE_ENV': JSON.stringify('production'),
   },
   build: {
-    outDir: 'dist-embed',
-    emptyOutDir: true,
+    // Emit into the served app output so the widget ships from Akili's own
+    // deployment at /embed/akili-widget.iife.js.
+    outDir: 'dist/embed',
+    // Do NOT empty: the app build (`vite build`) writes dist/ first; clearing
+    // here would delete dist/index.html and the app assets.
+    emptyOutDir: false,
     // Inline the widget's CSS into the JS (it self-injects a <style>); also
     // avoids emitting any standalone asset that a host would have to wire up.
     cssCodeSplit: false,

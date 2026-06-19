@@ -13,25 +13,37 @@ confidence, sources, and any SNIL code/output.
 
 ---
 
-## 1. Plain HTML page (`<script>` tag)
+## 1. Plain HTML page — the one-liner
 
-Build the standalone bundle, then load the IIFE and call `Akili.mount()`:
-
-```bash
-npm run build:embed   # → dist-embed/akili-widget.iife.js
-```
+Akili **serves its own widget bundle** from its deployment, so any site can drop
+in a single script tag — no build step, no hosting the file yourself:
 
 ```html
-<script src="/path/to/akili-widget.iife.js"></script>
-<script>
-  Akili.mount(); // floats bottom-right, Swahili
-</script>
+<script src="https://akili-laetoli.vercel.app/embed/akili-widget.iife.js" defer
+        onload="Akili.mount()"></script>
 ```
 
-The IIFE bundle defines the global `window.Akili = { mount }`. No module system,
-framework, or peer dependency is required — React is bundled in.
+That's it. The `defer` + `onload` pair waits for the bundle, then mounts the
+floating launcher (bottom-right, Swahili). The IIFE defines the global
+`window.Akili = { mount }`; React and the engine are bundled in, so no module
+system, framework, or peer dependency is required.
 
-See [`embed.html`](../embed.html) at the repo root for a runnable demo.
+Want the launcher bottom-left, or in English? Call `mount` with options instead:
+
+```html
+<script src="https://akili-laetoli.vercel.app/embed/akili-widget.iife.js" defer
+        onload="Akili.mount(undefined, { position: 'bottom-left', lang: 'en' })"></script>
+```
+
+> **Where the bundle comes from.** A single `npm run build` (what Vercel runs)
+> emits **both** the console app (`dist/`) and the widget into `dist/embed/`, so
+> the IIFE is published at `/embed/akili-widget.iife.js` on Akili's own origin.
+> See [Build outputs](#build-outputs) below.
+
+**Self-test:** this deployment also serves
+[`/embed-demo.html`](https://akili-laetoli.vercel.app/embed-demo.html) — a page
+that loads the local bundle and mounts it, so you can confirm a fresh build works
+end-to-end. The source is [`public/embed-demo.html`](../public/embed-demo.html).
 
 ## 2. ES module / React host
 
@@ -87,19 +99,27 @@ Returns a handle; call **`unmount()`** to tear the widget down.
 
 ## Build outputs
 
-`npm run build:embed` (config: `vite.embed.config.ts`) emits to `dist-embed/`:
+`npm run build` runs `tsc -b && vite build && vite build --config
+vite.embed.config.ts`, so a **single build** (the one Vercel runs) emits the
+console app to `dist/` **and** the widget bundle to `dist/embed/`:
 
 | File                          | Format | Use                                   |
 | ----------------------------- | ------ | ------------------------------------- |
-| `akili-widget.js`             | ESM    | `import { mountAkili }`               |
-| `akili-widget.umd.cjs`        | UMD    | CommonJS / AMD consumers              |
-| `akili-widget.iife.js`        | IIFE   | `<script>` tag → `window.Akili.mount` |
+| `dist/index.html` (+ assets)  | —      | the Akili console app                 |
+| `dist/embed/akili-widget.js`  | ESM    | `import { mountAkili }`               |
+| `dist/embed/akili-widget.umd.cjs` | UMD | CommonJS / AMD consumers              |
+| `dist/embed/akili-widget.iife.js` | IIFE | `<script>` tag → `window.Akili.mount` |
+
+Because the embed bundle lands **inside** the served `dist/`, it is published on
+Akili's own origin at `https://akili-laetoli.vercel.app/embed/akili-widget.iife.js`
+— that's what the one-liner above loads.
 
 CSS is **inlined** into the JS (the widget injects its own `<style>` at mount),
 so there is no separate stylesheet to wire up.
 
-`npm run build:all` produces both the console app (`dist/`) and the embed bundle
-(`dist-embed/`).
+`npm run build:embed` builds only the widget (config: `vite.embed.config.ts`),
+emitting into `dist/embed/` without clearing the rest of `dist/`. (`build:all`
+is an alias for `build`.) Both `dist/` and `dist-embed/` are gitignored.
 
 ---
 

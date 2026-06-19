@@ -148,10 +148,13 @@ kbd {
   background: var(--gold);
 }
 .akili-welcome h2 {
-  margin: 0 0 8px;
-  font-size: 25px;
+  margin: 0 auto 8px;
+  max-width: 520px;
+  font-size: 24px;
+  line-height: 1.25;
   color: var(--green);
   letter-spacing: 0.01em;
+  text-wrap: balance;
 }
 .akili-welcome p {
   margin: 0 auto 24px;
@@ -389,6 +392,35 @@ kbd {
 @media (prefers-reduced-motion: reduce) {
   .thinking .dot { animation: none; opacity: .6; }
 }
+
+/* ---------- Follow-up suggestions ---------- */
+.akili-followups {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-left: 2px;
+}
+.akili-followups-lead {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ink-soft);
+  margin-right: 2px;
+}
+.followup-chip {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--green);
+  background: var(--green-soft);
+  border: 1px solid #cfe0cf;
+  border-radius: 999px;
+  padding: 7px 14px;
+  transition: border-color .15s ease, background .15s ease, transform .06s ease;
+}
+.followup-chip:hover { border-color: var(--green); background: #dcebda; }
+.followup-chip:active { transform: translateY(1px); }
 
 /* ---------- Composer ---------- */
 .akili-composer {

@@ -20,6 +20,7 @@ import {
   isWarningLine,
   toLines,
 } from './ui/format';
+import { followupsFor } from './ui/followups';
 import { type StoredMsg } from './lib/memory';
 import { getMemory, DataMemoryStore } from './lib/getMemory';
 import { loadMuted, saveMuted } from './lib/mute';
@@ -188,6 +189,12 @@ export function App() {
 
   const isEmpty = messages.length === 0;
 
+  // Follow-up chips: when the newest message is an answer and we're idle, offer
+  // 2–3 domain-relevant next questions. Clicking one sends it.
+  const last = messages[messages.length - 1];
+  const followups =
+    !busy && last && last.role === 'akili' ? followupsFor(last.answer.domain) : [];
+
   return (
     <div className="akili-app">
       <Header
@@ -219,6 +226,10 @@ export function App() {
           )}
 
           {busy && <Thinking />}
+
+          {followups.length > 0 && (
+            <FollowUps prompts={followups} onPick={(p) => void send(p)} />
+          )}
         </div>
       </main>
 
@@ -290,10 +301,11 @@ function Welcome({ onPick, busy }: { onPick: (p: string) => void; busy: boolean 
   return (
     <section className="akili-welcome">
       <span className="akili-welcome-mark" aria-hidden="true" />
-      <h2>Karibu kwenye Akili</h2>
+      <h2>Akili — AI ya Kiswahili, huru na bila mtandao</h2>
       <p>
-        Uliza chochote kwa Kiswahili — afya, fasihi, lugha, au hesabu. Akili
-        huchagua mtaalamu sahihi na kujibu papo hapo, bila kutuma data popote.
+        Uliza chochote kwa Kiswahili — afya, fasihi, lugha, sheria, kilimo,
+        elimu, biashara na SNIL. Akili huchagua mtaalamu sahihi na kujibu papo
+        hapo, bila kutuma data popote.
       </p>
       <div className="akili-starters" role="group" aria-label="Mifano ya maswali">
         {STARTERS.map((s) => (
@@ -463,6 +475,32 @@ function Thinking() {
         <span className="dot" />
         <span className="dot" />
       </div>
+    </div>
+  );
+}
+
+// ── follow-up suggestions ───────────────────────────────────────────────────────
+
+function FollowUps({
+  prompts,
+  onPick,
+}: {
+  prompts: string[];
+  onPick: (p: string) => void;
+}) {
+  return (
+    <div className="akili-followups" role="group" aria-label="Maswali ya kuendelea">
+      <span className="akili-followups-lead">Endelea kuuliza:</span>
+      {prompts.map((p) => (
+        <button
+          key={p}
+          type="button"
+          className="followup-chip"
+          onClick={() => onPick(p)}
+        >
+          {p}
+        </button>
+      ))}
     </div>
   );
 }
