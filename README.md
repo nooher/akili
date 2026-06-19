@@ -79,11 +79,57 @@ change. (Akili vendors a tiny typed fetch client for Data's REST/RPC endpoints �
 see `src/lib/dataMemory.ts` — because `@laetoli/data` lives in the repo's
 `client/` subdir, which npm can't install via a git sub-path.)
 
-## Use the engine directly
+## Use Akili as a library
+
+Akili's engine is a **github-installable package** — drop the sovereign brain into
+any Laetoli or third-party app, server, or script. It runs anywhere Node runs
+(no browser, no DOM, no network, no external LLM).
+
+```bash
+npm i github:nooher/akili
+```
+
+Then import from the `akili/engine` subpath (the engine ships as a committed,
+self-contained ESM bundle in `pkg/` — `@laetoli/snil` is bundled in, so this is
+the only install you need):
+
 ```ts
-import { askAkili } from './src/akili';
+import { askAkili, createAkiliSession } from 'akili/engine';
+
+// one-shot
 const a = await askAkili('Dalili za malaria ni zipi?');   // → Afya (TibaAI)
+console.log(a.domain, a.expert);                          // 'afya' 'afya-tibaai'
+console.log(a.text.sw);                                   // Swahili answer + sources
+
 const b = await askAkili('Kokotoa wastani wa 10, 20, 30'); // → SNIL: code + output
+console.log(b.snil?.code, '=>', b.snil?.output);          // SNIL source => '20'
+
+// stateful, context-aware conversation
+const session = createAkiliSession();
+await session.ask('Habari Akili');
+const follow = await session.ask('na malaria je?');        // remembers context
+```
+
+`askAkili(q)` returns an `AkiliAnswer` — `{ domain, expert, text: { sw, en? },
+confidence, sources, snil? }`. Also exported: `createAkili(experts)` (build a
+custom registry), `createAkiliSession(akili?, maxTurns?)`, every individual
+expert (`afyaExpert`, `snilExpert`, …), and all the contract types.
+
+> **Offline & sovereign.** Every answer is computed by deterministic, vendored
+> TypeScript — the TibaAI and Kasuku engines are baked in, SNIL is bundled. No
+> model is ever downloaded or called. The package is byte-for-byte reproducible
+> and runs on a laptop or a Raspberry Pi.
+
+Inside this repo you can also import straight from source: `import { askAkili }
+from './src/akili'` (or `'./src/node'` for the stable Node re-export).
+
+### Build the package
+
+The shipped artifact lives in `pkg/` and is **committed** (like snil-core's
+`dist/`). Rebuild it with:
+
+```bash
+npm run build:pkg    # tsup → pkg/index.js (ESM) + pkg/index.d.ts
 ```
 
 Apache-2.0 · © 2026 Laetoli Ltd · part of the Laetoli sovereign stack
