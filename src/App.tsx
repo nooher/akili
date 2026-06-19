@@ -22,10 +22,22 @@ import {
 } from './ui/format';
 import { followupsFor } from './ui/followups';
 import { type StoredMsg } from './lib/memory';
-import { getMemory, DataMemoryStore } from './lib/getMemory';
+import { getSessionMemory, DataMemoryStore } from './lib/getMemory';
 import { loadMuted, saveMuted } from './lib/mute';
 import { useAsr, useTts } from './lib/useVoice';
 import { track } from './lib/telemetry';
+import {
+  listSessions,
+  createSession as createSessionMeta,
+  getSession,
+  saveSession,
+  renameSession,
+  deleteSession,
+  setCurrent,
+  resolveInitialSession,
+  type SessionMeta,
+} from './lib/sessions';
+import { downloadMarkdown, downloadJSON } from './lib/exportChat';
 
 // ── message model ─────────────────────────────────────────────────────────────
 
@@ -49,25 +61,51 @@ const STARTERS: Starter[] = [
 let seq = 0;
 const nextId = () => `m${++seq}-${Date.now().toString(36)}`;
 
+/** Swahili relative-time label for the history list (coarse, no deps). */
+function relativeTime(iso: string): string {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return '';
+  const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (secs < 60) return 'sasa hivi';
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `dakika ${mins}`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `saa ${hrs}`;
+  const days = Math.round(hrs / 24);
+  if (days < 7) return `siku ${days}`;
+  const weeks = Math.round(days / 7);
+  if (weeks < 5) return `wiki ${weeks}`;
+  const months = Math.round(days / 30);
+  if (months < 12) return `miezi ${months}`;
+  return `miaka ${Math.round(days / 365)}`;
+}
+
 // ── component ─────────────────────────────────────────────────────────────────
 
 export function App() {
-  // Persistence seam + in-memory multi-turn session live for the App's lifetime.
-  // getMemory() returns the Laetoli-Data-backed store (long-term vector memory,
-  // mirrored to localStorage) when VITE_AKILI_DATA_URL + _ANON_KEY are set, else
-  // the plain localStorage store — so the app is unchanged + offline by default.
-  const storeRef = useRef(getMemory());
+  // The active conversation is resolved on first render: legacy single-session
+  // history is migrated, the stored "current" id is honoured, else the newest /
+  // a fresh session is opened. Each session has its OWN scoped memory store.
+  const initial = useRef<SessionMeta>(resolveInitialSession());
+  const [activeId, setActiveId] = useState<string>(initial.current.id);
+  const [sessions, setSessions] = useState<SessionMeta[]>(() => listSessions());
+
+  // Per-session persistence seam. getSessionMemory() returns a Laetoli-Data-
+  // backed store (long-term vector memory, mirrored to localStorage, scoped to
+  // this session id) when VITE_AKILI_DATA_URL + _ANON_KEY are set, else the
+  // plain per-session localStorage store — offline + private by default.
+  const storeRef = useRef(getSessionMemory(initial.current.id));
   const sessionRef = useRef<AkiliSession>(createAkiliSession(akili));
 
   const [messages, setMessages] = useState<Message[]>(
-    // Restore a prior conversation from localStorage on first render. The engine
-    // session starts fresh (new turns rebuild context); the visible transcript is
-    // the source of truth that's persisted.
-    () => storeRef.current.load()?.messages ?? [],
+    // Restore the active conversation. The engine session starts fresh (new
+    // turns rebuild context); the visible transcript is the persisted truth.
+    () => getSession(initial.current.id)?.messages ?? [],
   );
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [muted, setMuted] = useState(() => loadMuted());
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const streamRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
@@ -75,11 +113,123 @@ export function App() {
   const asr = useAsr();
   const mutedRef = useRef(muted);
   mutedRef.current = muted;
+  // Guard the persistence effect from writing during a session switch (when
+  // `messages` is replaced wholesale, not edited by the user).
+  const skipSaveRef = useRef(false);
 
   // Persist the transcript whenever it changes (debounced via React batching).
+  // Writes to the active session's scoped store AND refreshes the sidebar's
+  // metadata (updatedAt + auto-title from the first user message).
   useEffect(() => {
+    if (skipSaveRef.current) {
+      skipSaveRef.current = false;
+      return;
+    }
     storeRef.current.save(messages);
-  }, [messages]);
+    saveSession(activeId, messages);
+    setSessions(listSessions());
+  }, [messages, activeId]);
+
+  const refreshSessions = useCallback(() => setSessions(listSessions()), []);
+
+  // Switch to another conversation: rebuild the engine + scoped store, load that
+  // transcript, and mark it current. The save effect is skipped for the load.
+  const switchSession = useCallback(
+    (id: string) => {
+      if (id === activeId) {
+        setDrawerOpen(false);
+        return;
+      }
+      tts.cancel();
+      asr.stop();
+      sessionRef.current.reset();
+      storeRef.current = getSessionMemory(id);
+      setCurrent(id);
+      skipSaveRef.current = true;
+      setMessages(getSession(id)?.messages ?? []);
+      setActiveId(id);
+      setDraft('');
+      setDrawerOpen(false);
+      refreshSessions();
+      track('session_switch', {});
+      requestAnimationFrame(() => taRef.current?.focus());
+    },
+    [activeId, tts, asr, refreshSessions],
+  );
+
+  // Start a brand-new conversation and switch to it.
+  const newSession = useCallback(() => {
+    tts.cancel();
+    asr.stop();
+    sessionRef.current.reset();
+    const meta = createSessionMeta();
+    storeRef.current = getSessionMemory(meta.id);
+    skipSaveRef.current = true;
+    setMessages([]);
+    setActiveId(meta.id);
+    setDraft('');
+    setDrawerOpen(false);
+    refreshSessions();
+    track('session_new', {});
+    requestAnimationFrame(() => taRef.current?.focus());
+  }, [tts, asr, refreshSessions]);
+
+  const onRenameSession = useCallback(
+    (id: string, title: string) => {
+      renameSession(id, title);
+      refreshSessions();
+      track('session_rename', {});
+    },
+    [refreshSessions],
+  );
+
+  // Delete a conversation; if it was active, fall back to the newest remaining
+  // session or a fresh one so the view is never left dangling.
+  const onDeleteSession = useCallback(
+    (id: string) => {
+      const remaining = deleteSession(id);
+      if (id === activeId) {
+        tts.cancel();
+        asr.stop();
+        sessionRef.current.reset();
+        if (remaining.length > 0) {
+          const next = remaining[0];
+          storeRef.current = getSessionMemory(next.id);
+          setCurrent(next.id);
+          skipSaveRef.current = true;
+          setMessages(getSession(next.id)?.messages ?? []);
+          setActiveId(next.id);
+        } else {
+          const meta = createSessionMeta();
+          storeRef.current = getSessionMemory(meta.id);
+          skipSaveRef.current = true;
+          setMessages([]);
+          setActiveId(meta.id);
+        }
+      }
+      refreshSessions();
+      track('session_delete', {});
+    },
+    [activeId, tts, asr, refreshSessions],
+  );
+
+  const activeMeta = sessions.find((s) => s.id === activeId);
+
+  const onExportMarkdown = useCallback(() => {
+    downloadMarkdown(messages, activeMeta?.title ?? 'Mazungumzo na Akili');
+    track('chat_export', { format: 'md' });
+  }, [messages, activeMeta]);
+
+  const onExportJSON = useCallback(() => {
+    const meta = activeMeta ?? {
+      id: activeId,
+      title: 'Mazungumzo na Akili',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    downloadJSON(meta, messages);
+    track('chat_export', { format: 'json' });
+  }, [messages, activeMeta, activeId]);
 
   // Keep the newest message in view.
   useEffect(() => {
@@ -164,17 +314,6 @@ export function App() {
     });
   }, [tts]);
 
-  const onNewChat = useCallback(() => {
-    tts.cancel();
-    asr.stop();
-    sessionRef.current.reset();
-    storeRef.current.clear();
-    setMessages([]);
-    setDraft('');
-    track('chat_reset', {});
-    requestAnimationFrame(() => taRef.current?.focus());
-  }, [tts, asr]);
-
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
     void send(draft);
@@ -196,13 +335,36 @@ export function App() {
     !busy && last && last.role === 'akili' ? followupsFor(last.answer.domain) : [];
 
   return (
-    <div className="akili-app">
+    <div className={`akili-app${drawerOpen ? ' is-drawer-open' : ''}`}>
+      <Sidebar
+        sessions={sessions}
+        activeId={activeId}
+        drawerOpen={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        onNew={newSession}
+        onSelect={switchSession}
+        onRename={onRenameSession}
+        onDelete={onDeleteSession}
+      />
+      {drawerOpen && (
+        <button
+          type="button"
+          className="akili-scrim"
+          aria-label="Funga orodha"
+          onClick={() => setDrawerOpen(false)}
+        />
+      )}
+
+      <div className="akili-main">
       <Header
         ttsSupported={tts.supported}
         muted={muted}
         onToggleMute={onToggleMute}
-        canReset={!isEmpty}
-        onNewChat={onNewChat}
+        canExport={!isEmpty}
+        onExportMarkdown={onExportMarkdown}
+        onExportJSON={onExportJSON}
+        onNewChat={newSession}
+        onOpenDrawer={() => setDrawerOpen(true)}
       />
 
       <main className="akili-stream" ref={streamRef} aria-live="polite" aria-busy={busy}>
@@ -247,6 +409,168 @@ export function App() {
         listening={asr.listening}
         onMic={onMic}
       />
+      </div>
+    </div>
+  );
+}
+
+// ── history sidebar / drawer ───────────────────────────────────────────────────
+
+interface SidebarProps {
+  sessions: SessionMeta[];
+  activeId: string;
+  drawerOpen: boolean;
+  onClose: () => void;
+  onNew: () => void;
+  onSelect: (id: string) => void;
+  onRename: (id: string, title: string) => void;
+  onDelete: (id: string) => void;
+}
+
+function Sidebar({
+  sessions,
+  activeId,
+  drawerOpen,
+  onClose,
+  onNew,
+  onSelect,
+  onRename,
+  onDelete,
+}: SidebarProps) {
+  return (
+    <aside
+      className={`akili-sidebar${drawerOpen ? ' is-open' : ''}`}
+      aria-label="Mazungumzo yaliyopita"
+    >
+      <div className="akili-sidebar-head">
+        <span className="akili-sidebar-title">Mazungumzo</span>
+        <button
+          type="button"
+          className="akili-sidebar-close"
+          onClick={onClose}
+          aria-label="Funga orodha"
+        >
+          <span aria-hidden="true">✕</span>
+        </button>
+      </div>
+
+      <button type="button" className="akili-newchat-btn" onClick={onNew}>
+        <span aria-hidden="true">＋</span> Mazungumzo mapya
+      </button>
+
+      <nav className="akili-session-list" aria-label="Orodha ya mazungumzo">
+        {sessions.length === 0 ? (
+          <p className="akili-session-empty">Hakuna mazungumzo bado.</p>
+        ) : (
+          sessions.map((s) => (
+            <SessionRow
+              key={s.id}
+              session={s}
+              active={s.id === activeId}
+              onSelect={() => onSelect(s.id)}
+              onRename={(t) => onRename(s.id, t)}
+              onDelete={() => onDelete(s.id)}
+            />
+          ))
+        )}
+      </nav>
+    </aside>
+  );
+}
+
+function SessionRow({
+  session,
+  active,
+  onSelect,
+  onRename,
+  onDelete,
+}: {
+  session: SessionMeta;
+  active: boolean;
+  onSelect: () => void;
+  onRename: (title: string) => void;
+  onDelete: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(session.title);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing) {
+      setDraft(session.title);
+      requestAnimationFrame(() => inputRef.current?.select());
+    }
+  }, [editing, session.title]);
+
+  const commit = () => {
+    setEditing(false);
+    const next = draft.trim();
+    if (next && next !== session.title) onRename(next);
+  };
+
+  if (editing) {
+    return (
+      <div className={`akili-session-row${active ? ' is-active' : ''} is-editing`}>
+        <input
+          ref={inputRef}
+          className="akili-session-rename"
+          value={draft}
+          aria-label="Badilisha jina la mazungumzo"
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              commit();
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              setEditing(false);
+            }
+          }}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className={`akili-session-row${active ? ' is-active' : ''}`}>
+      <button
+        type="button"
+        className="akili-session-pick"
+        onClick={onSelect}
+        aria-current={active ? 'true' : undefined}
+        title={session.title}
+      >
+        <span className="akili-session-name">{session.title}</span>
+        <span className="akili-session-time">{relativeTime(session.updatedAt)}</span>
+      </button>
+      <div className="akili-session-actions">
+        <button
+          type="button"
+          className="akili-session-act"
+          onClick={() => setEditing(true)}
+          title="Badilisha jina"
+          aria-label={`Badilisha jina la "${session.title}"`}
+        >
+          <span aria-hidden="true">✎</span>
+        </button>
+        <button
+          type="button"
+          className="akili-session-act akili-session-act--del"
+          onClick={() => {
+            if (
+              typeof window === 'undefined' ||
+              window.confirm(`Futa "${session.title}"? Hatua hii haiwezi kutenduliwa.`)
+            ) {
+              onDelete();
+            }
+          }}
+          title="Futa mazungumzo"
+          aria-label={`Futa "${session.title}"`}
+        >
+          <span aria-hidden="true">🗑</span>
+        </button>
+      </div>
     </div>
   );
 }
@@ -257,14 +581,35 @@ interface HeaderProps {
   ttsSupported: boolean;
   muted: boolean;
   onToggleMute: () => void;
-  canReset: boolean;
+  canExport: boolean;
+  onExportMarkdown: () => void;
+  onExportJSON: () => void;
   onNewChat: () => void;
+  onOpenDrawer: () => void;
 }
 
-function Header({ ttsSupported, muted, onToggleMute, canReset, onNewChat }: HeaderProps) {
+function Header({
+  ttsSupported,
+  muted,
+  onToggleMute,
+  canExport,
+  onExportMarkdown,
+  onExportJSON,
+  onNewChat,
+  onOpenDrawer,
+}: HeaderProps) {
+  const [exportOpen, setExportOpen] = useState(false);
   return (
     <header className="akili-top">
       <div className="akili-brand">
+        <button
+          type="button"
+          className="akili-hamburger"
+          onClick={onOpenDrawer}
+          aria-label="Fungua orodha ya mazungumzo"
+        >
+          <span aria-hidden="true">☰</span>
+        </button>
         <span className="akili-mark" aria-hidden="true" />
         <div>
           <h1>AKILI</h1>
@@ -284,11 +629,48 @@ function Header({ ttsSupported, muted, onToggleMute, canReset, onNewChat }: Head
             <span className="sr-only">{muted ? 'Washa sauti' : 'Zima sauti'}</span>
           </button>
         )}
-        {canReset && (
-          <button type="button" className="akili-newchat" onClick={onNewChat}>
-            Anza upya
-          </button>
+        {canExport && (
+          <div className="akili-export">
+            <button
+              type="button"
+              className="akili-iconbtn"
+              onClick={() => setExportOpen((v) => !v)}
+              aria-haspopup="menu"
+              aria-expanded={exportOpen}
+              title="Pakua mazungumzo"
+            >
+              <span aria-hidden="true">⤓</span>
+              <span className="sr-only">Pakua mazungumzo</span>
+            </button>
+            {exportOpen && (
+              <div className="akili-export-menu" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setExportOpen(false);
+                    onExportMarkdown();
+                  }}
+                >
+                  Pakua Markdown (.md)
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setExportOpen(false);
+                    onExportJSON();
+                  }}
+                >
+                  Pakua JSON (.json)
+                </button>
+              </div>
+            )}
+          </div>
         )}
+        <button type="button" className="akili-newchat" onClick={onNewChat}>
+          + Mpya
+        </button>
         <span className="akili-credit">Na Laetoli</span>
       </div>
     </header>

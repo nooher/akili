@@ -10,6 +10,7 @@
 
 import { createMemoryStore, type MemoryStore } from './memory';
 import { createDataClient, DataMemoryStore } from './dataMemory';
+import { SESSION_PREFIX } from './sessions';
 
 /** Resolved Data config, or null when Akili should stay sovereign-local. */
 export interface DataConfig {
@@ -77,6 +78,28 @@ export function getMemory(config: DataConfig | null = readDataConfig()): MemoryS
   if (!config) return local;
   const client = createDataClient({ url: config.url, anonKey: config.anonKey });
   return new DataMemoryStore(client, { session: deviceSession(), local });
+}
+
+/**
+ * Per-session memory selector. Returns a MemoryStore scoped to a single named
+ * conversation (`sessionId`): the local mirror writes to `akili:session:<id>`,
+ * and the Laetoli-Data layer (when configured) tags rows with that id via
+ * `metadata.session` so recall can be scoped per conversation. Falls back to the
+ * plain localStorage store (offline/private) when Data isn't configured.
+ */
+export function getSessionMemory(
+  sessionId: string,
+  config: DataConfig | null = readDataConfig(),
+): MemoryStore {
+  const local = createMemoryStore(undefined, `${SESSION_PREFIX}${sessionId}`);
+  if (!config) return local;
+  const client = createDataClient({ url: config.url, anonKey: config.anonKey });
+  // Scope long-term memory to this conversation: combine the stable device id
+  // with the session id so a shared Data instance can group/filter per chat.
+  return new DataMemoryStore(client, {
+    session: `${deviceSession()}:${sessionId}`,
+    local,
+  });
 }
 
 export { DataMemoryStore };
