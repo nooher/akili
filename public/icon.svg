@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Akili">
+  <!-- On-brand Akili app icon: gold square mark with a deep-green inner square, on Tanzanian green.
+       Mark sits within the maskable safe zone (~80% center). -->
+  <rect width="512" height="512" fill="#1f5135"/>
+  <!-- gold square mark -->
+  <rect x="146" y="146" width="220" height="220" rx="44" fill="#c9962f"/>
+  <!-- inner deep-green square -->
+  <rect x="210" y="210" width="92" height="92" rx="18" fill="#173d28"/>
+</svg>

@@ -1,0 +1,77 @@
+/* error-boundary.css — scoped styles for the Akili crash fallback.
+   Self-contained so it never depends on App.tsx / styles.css being off-limits.
+   Tanzania palette: deep green field, gold mark. */
+.akili-boundary {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #1f5135;
+  color: #f5f1e6;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+.akili-boundary-card {
+  max-width: 420px;
+  width: 100%;
+  text-align: center;
+  background: #173d28;
+  border: 1px solid rgba(201, 150, 47, 0.35);
+  border-radius: 20px;
+  padding: 40px 32px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.akili-boundary-mark {
+  display: block;
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 20px;
+  border-radius: 14px;
+  background: #c9962f;
+  position: relative;
+}
+
+.akili-boundary-mark::after {
+  content: '';
+  position: absolute;
+  inset: 38%;
+  border-radius: 5px;
+  background: #173d28;
+}
+
+.akili-boundary-card h1 {
+  margin: 0 0 8px;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #f5f1e6;
+}
+
+.akili-boundary-card p {
+  margin: 0 0 24px;
+  font-size: 0.95rem;
+  color: rgba(245, 241, 230, 0.75);
+}
+
+.akili-boundary-btn {
+  appearance: none;
+  border: none;
+  cursor: pointer;
+  background: #c9962f;
+  color: #173d28;
+  font-weight: 700;
+  font-size: 0.95rem;
+  padding: 12px 28px;
+  border-radius: 12px;
+  transition: filter 0.15s ease;
+}
+
+.akili-boundary-btn:hover {
+  filter: brightness(1.06);
+}
+
+.akili-boundary-btn:focus-visible {
+  outline: 3px solid #f5f1e6;
+  outline-offset: 2px;
+}
