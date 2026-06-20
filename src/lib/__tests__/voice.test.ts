@@ -9,7 +9,9 @@ import {
   preferredAsrLang,
   pickSwahiliVoice,
   textForSpeech,
+  loadVoices,
   ASR_LANGS,
+  type VoiceLike,
 } from '../voice';
 
 describe('speech recognition feature detection', () => {
@@ -94,6 +96,78 @@ describe('pickSwahiliVoice', () => {
       { lang: 'fr-FR', name: 'Amelie' },
     ]);
     expect(v?.name).toBe('Alex');
+  });
+});
+
+describe('loadVoices', () => {
+  // A synchronous timer so the timeout path resolves without real waiting.
+  const immediate = (cb: () => void) => cb();
+
+  it('resolves empty when synthesis is absent', async () => {
+    expect(await loadVoices(null)).toEqual([]);
+    expect(await loadVoices(undefined)).toEqual([]);
+    expect(await loadVoices({})).toEqual([]);
+  });
+
+  it('resolves immediately when voices are already present', async () => {
+    const voices: VoiceLike[] = [{ lang: 'sw-TZ', name: 'Asha' }];
+    let listenerAdded = false;
+    const synth = {
+      getVoices: () => voices,
+      addEventListener: () => {
+        listenerAdded = true;
+      },
+      removeEventListener: () => {},
+    };
+    const out = await loadVoices(synth, 1500, immediate);
+    expect(out).toEqual(voices);
+    // No need to wait for the event when voices are ready up front.
+    expect(listenerAdded).toBe(false);
+  });
+
+  it('waits for voiceschanged when initially empty', async () => {
+    let voices: VoiceLike[] = [];
+    let fire: (() => void) | null = null;
+    const synth = {
+      getVoices: () => voices,
+      addEventListener: (_t: string, cb: () => void) => {
+        fire = cb;
+      },
+      removeEventListener: () => {},
+    };
+    // Never let the timeout fire; the event provides the voices.
+    const p = loadVoices(synth, 1500, () => {});
+    voices = [{ lang: 'sw-KE', name: 'Imani' }];
+    fire!();
+    expect(await p).toEqual(voices);
+  });
+
+  it('falls back to the timeout when the event never fires', async () => {
+    const synth = {
+      getVoices: () => [] as VoiceLike[],
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    // immediate timer → resolves with whatever getVoices() yields (still []).
+    expect(await loadVoices(synth, 1500, immediate)).toEqual([]);
+  });
+
+  it('uses the onvoiceschanged property when addEventListener is absent', async () => {
+    let voices: VoiceLike[] = [];
+    const synth: {
+      getVoices: () => VoiceLike[];
+      onvoiceschanged: (() => void) | null;
+    } = {
+      getVoices: () => voices,
+      onvoiceschanged: null,
+    };
+    const p = loadVoices(synth, 1500, () => {});
+    expect(typeof synth.onvoiceschanged).toBe('function');
+    voices = [{ lang: 'sw', name: 'X' }];
+    synth.onvoiceschanged!();
+    expect(await p).toEqual(voices);
+    // Listener detaches itself after resolving.
+    expect(synth.onvoiceschanged).toBeNull();
   });
 });
 

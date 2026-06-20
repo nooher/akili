@@ -32,6 +32,8 @@ export function domainLabel(domain: AkiliDomain): string {
       return 'Elimu';
     case 'biashara':
       return 'Biashara';
+    case 'logistiki':
+      return 'Logistiki';
     case 'snil':
       return 'SNIL';
     case 'jumla':
@@ -66,6 +68,7 @@ const DOMAIN_ANSI: Record<AkiliDomain, string> = {
   kilimo: '32', //   green
   elimu: '36', //    cyan
   biashara: '33', // yellow
+  logistiki: '32', // green
   snil: '32', //     green
   jumla: '37', //    white/grey
 };

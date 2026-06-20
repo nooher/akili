@@ -25,8 +25,29 @@ export interface AkiliQuery {
   text: string;
   /** Preferred answer language (default 'sw'). */
   lang?: AkiliLang;
-  /** Optional structured context an expert may use (e.g. patient context for afya). */
+  /**
+   * Optional structured context an expert may use (e.g. patient context for
+   * afya, or `logistics`/`memory` injected by a multi-turn AkiliSession).
+   */
   context?: Record<string, unknown>;
+}
+
+/**
+ * Anaphora bias the router applies on top of expert scores: when a session
+ * detects a short follow-up ("…na VAT yake?") it nudges `domain` up by `boost`
+ * so a near-tie resolves to the prior domain WITHOUT overriding a clear winner.
+ * Carried on `context.bias`; absent for one-shot asks.
+ */
+export interface AkiliBias {
+  domain: AkiliDomain;
+  /** Small additive score boost applied to the prior domain (0..1). */
+  boost: number;
+  /**
+   * Score floor for the prior domain on a follow-up so it competes even when its
+   * own matcher (which can't see carried context) scored low. Kept below the
+   * "clear cue" threshold so a strong new-topic query still wins outright.
+   */
+  floor: number;
 }
 
 export interface AkiliSource {

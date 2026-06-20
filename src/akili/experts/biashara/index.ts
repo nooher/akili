@@ -42,11 +42,19 @@ const BIASHARA_CUES = [
   // Kiswahili — finance
   'pesa', 'fedha', 'akiba', 'mkopo', 'riba', 'benki', 'sacco', 'vicoba', 'kibubu',
   'mpesa', 'm pesa', 'tigo pesa', 'airtel money', 'simu banking', 'malipo',
+  // Kiswahili — added
+  'mpango wa biashara', 'bajeti', 'kumbukumbu', 'hesabu za biashara', 'utangazaji',
+  'masoko', 'matangazo', 'mtandaoni', 'bima', 'hatari', 'deni', 'madeni', 'hisa',
+  'ushirika', 'brela', 'tin', 'efd', 'risiti', 'kuuza', 'wadeni',
   // English
   'business', 'entrepreneur', 'startup', 'shop', 'company', 'capital', 'profit',
   'loss', 'income', 'expenses', 'cost', 'price', 'sales', 'customer', 'customers',
   'market', 'tax', 'vat', 'licence', 'license', 'money', 'savings', 'loan',
   'interest', 'bank', 'mobile money', 'payment', 'budget', 'finance',
+  // English — added
+  'business plan', 'bookkeeping', 'records', 'marketing', 'advertising', 'branding',
+  'online', 'social media', 'insurance', 'risk', 'debt', 'credit', 'shares',
+  'cooperative', 'receipt', 'selling', 'pricing', 'cashflow', 'cash flow',
 ];
 
 interface KBEntry {
@@ -178,6 +186,119 @@ const KB: KBEntry[] = [
       { label: 'TCDC — Tume ya Maendeleo ya Ushirika' },
       { label: 'Akili KB — Biashara' },
     ],
+  },
+  {
+    id: 'mpango-wa-biashara',
+    cues: ['mpango wa biashara', 'mpango', 'business plan', 'plan', 'wazo', 'idea', 'mkakati',
+      'lengo', 'utafiti wa soko', 'market research'],
+    sw:
+      'Mpango wa biashara (rahisi lakini muhimu):\n' +
+      '• WAZO & TATIZO: unauza nini, na unatatua tatizo gani la wateja?\n' +
+      '• SOKO: wateja wako ni nani, wapo wapi, na washindani wako ni akina nani?\n' +
+      '• BEI & MAUZO: utauzaje, kwa bei gani, na unatarajia kuuza kiasi gani?\n' +
+      '• GHARAMA & MTAJI: utahitaji pesa kiasi gani kuanza na kuendesha kila mwezi?\n' +
+      '• FAIDA & MUDA: utaanza kupata faida lini, na mtaji utarejea baada ya muda gani?\n' +
+      'Mpango wa kurasa 1–2 unatosha kuanzia; uboreshe unapojifunza zaidi kutoka sokoni.',
+    en:
+      'Business plan (simple but essential):\n' +
+      '• IDEA & PROBLEM: what do you sell, and what customer problem does it solve?\n' +
+      '• MARKET: who are your customers, where are they, and who are your competitors?\n' +
+      '• PRICE & SALES: how will you sell, at what price, and how much do you expect to sell?\n' +
+      '• COSTS & CAPITAL: how much do you need to start and to run each month?\n' +
+      '• PROFIT & TIME: when will you start profiting, and how soon will capital return?\n' +
+      'A 1–2 page plan is enough to start; refine it as you learn from the market.',
+    sources: [{ label: 'Akili KB — Biashara', ref: 'Mpango wa biashara' }],
+  },
+  {
+    id: 'kumbukumbu-bajeti',
+    cues: ['kumbukumbu', 'hesabu za biashara', 'bookkeeping', 'records', 'bajeti', 'budget',
+      'daftari', 'ledger', 'cashflow', 'cash flow', 'mtiririko wa fedha'],
+    sw:
+      'Kumbukumbu na bajeti (uhasibu rahisi):\n' +
+      '• Weka DAFTARI moja: andika kila MAUZO (kinachoingia) na kila MATUMIZI (kinachotoka) kwa tarehe.\n' +
+      '• Hifadhi risiti zote; linganisha pesa za mkononi na daftari kila siku/jioni.\n' +
+      '• BAJETI: panga mapema kiasi cha kutumia kwa manunuzi, pango, usafiri na akiba.\n' +
+      '• Fuatilia MTIRIRIKO WA FEDHA — biashara inaweza kuwa na faida lakini ikakosa pesa taslimu (cashflow).\n' +
+      '• Jilipe mshahara wako badala ya kuchukua pesa za biashara ovyo.\n' +
+      'Programu rahisi za simu au daftari la kawaida zote zinafaa — muhimu ni uthabiti.',
+    en:
+      'Records and budgeting (simple bookkeeping):\n' +
+      '• Keep ONE book: record every SALE (money in) and every EXPENSE (money out) with the date.\n' +
+      '• Keep all receipts; reconcile cash on hand against the book each day/evening.\n' +
+      '• BUDGET: plan in advance what to spend on stock, rent, transport and savings.\n' +
+      '• Track CASH FLOW — a business can be profitable yet run out of cash.\n' +
+      '• Pay yourself a wage rather than randomly taking business money.\n' +
+      'A simple phone app or an ordinary notebook both work — consistency is what matters.',
+    sources: [{ label: 'Akili KB — Biashara', ref: 'Uhasibu na bajeti' }],
+  },
+  {
+    id: 'masoko-wateja',
+    cues: ['masoko', 'utangazaji', 'matangazo', 'marketing', 'advertising', 'branding', 'mtandaoni',
+      'online', 'social media', 'mitandao ya kijamii', 'wateja', 'customers', 'kutangaza'],
+    sw:
+      'Masoko na kuhudumia wateja:\n' +
+      '• Elewa mteja wako: anahitaji nini, analalamika nini, na yuko wapi (sokoni au mtandaoni)?\n' +
+      '• Jenga JINA (brand) thabiti: jina, nembo, na ubora unaotabirika hujenga uaminifu.\n' +
+      '• Tumia njia nafuu: maneno ya mdomo (referrals), WhatsApp/Instagram/TikTok, na ushiriki wa jamii.\n' +
+      '• Huduma bora kwa mteja huleta wateja warudio — wao ni nafuu kuliko kutafuta wapya.\n' +
+      '• Pokea malalamiko kwa heshima na yarekebishe; mteja mmoja asiyeridhika huwaambia wengi.\n' +
+      'Pima kinachofanya kazi (nani alinunua kwa sababu gani) kisha ongeza juhudi huko.',
+    en:
+      'Marketing and customer service:\n' +
+      '• Understand your customer: what they need, what they complain about, and where they are (market or online).\n' +
+      '• Build a consistent BRAND: a name, a logo, and predictable quality build trust.\n' +
+      '• Use cheap channels: word of mouth (referrals), WhatsApp/Instagram/TikTok, and community presence.\n' +
+      '• Great service brings repeat customers — they are cheaper than finding new ones.\n' +
+      '• Handle complaints respectfully and fix them; one unhappy customer tells many.\n' +
+      'Measure what works (who bought and why), then put more effort there.',
+    sources: [{ label: 'Akili KB — Biashara', ref: 'Masoko ya biashara ndogo' }],
+  },
+  {
+    id: 'bima-hatari',
+    cues: ['bima', 'insurance', 'hatari', 'risk', 'kuwaka moto', 'wizi', 'kinga', 'protection',
+      'majanga', 'dharura'],
+    sw:
+      'Bima na kudhibiti hatari:\n' +
+      '• Biashara inakabili hatari: moto, wizi, mafuriko, ugonjwa, au mteja asiyelipa.\n' +
+      '• BIMA hubadilisha hasara kubwa isiyotarajiwa kuwa malipo madogo ya kawaida (premium).\n' +
+      '• Aina za kawaida: bima ya mali/moto, bima ya mizigo, bima ya afya, na bima ya gari (ni lazima kisheria).\n' +
+      '• Soma masharti vizuri: nini kimebimwa, kiasi cha kulipwa, na vighairi (exclusions).\n' +
+      '• Tumia kampuni za bima zilizosajiliwa; thibitisha usajili na TIRA.\n' +
+      '• Mbali na bima: tenga akiba ya dharura na usiweke mayai yote kapu moja.',
+    en:
+      'Insurance and managing risk:\n' +
+      '• A business faces risks: fire, theft, floods, illness, or a non-paying customer.\n' +
+      '• INSURANCE turns a large unexpected loss into a small regular payment (premium).\n' +
+      '• Common types: property/fire, goods-in-transit, health, and motor cover (legally required).\n' +
+      '• Read the terms: what is covered, the payout, and the exclusions.\n' +
+      '• Use registered insurers; confirm registration with TIRA.\n' +
+      '• Beyond insurance: keep an emergency fund and don\'t put all eggs in one basket.',
+    sources: [
+      { label: 'TIRA — Mamlaka ya Usimamizi wa Bima Tanzania' },
+      { label: 'Akili KB — Biashara' },
+    ],
+  },
+  {
+    id: 'madeni-mikopo',
+    cues: ['deni', 'madeni', 'wadeni', 'debt', 'credit', 'kukopesha', 'kudai', 'mteja anadaiwa',
+      'kulipa deni', 'overdue', 'mauzo ya mkopo'],
+    sw:
+      'Kusimamia madeni na mauzo ya mkopo:\n' +
+      '• Ukiuza kwa mkopo, ANDIKA: nani, kiasi gani, tarehe ya kulipa — bila kumbukumbu ni hasara.\n' +
+      '• Weka kikomo cha mkopo unaotoa; usikopeshe zaidi ya unavyoweza kuvumilia kupoteza.\n' +
+      '• Fuatilia wadeni kwa heshima lakini kwa uthabiti; kumbushia kabla na baada ya tarehe.\n' +
+      '• Wewe ukikopa: kopa kwa lengo la kuzalisha (mtaji), si kwa matumizi; hakikisha faida inalipa riba.\n' +
+      '• Epuka kuchukua mkopo mmoja kulipa mwingine (mzunguko wa madeni).\n' +
+      'Deni likigoma kabisa, mkataba/risiti ni ushahidi; suluhisho la mazungumzo ni bora kuliko ugomvi.',
+    en:
+      'Managing debts and credit sales:\n' +
+      '• If you sell on credit, RECORD it: who, how much, due date — without records it becomes a loss.\n' +
+      '• Set a credit limit; never lend more than you can afford to lose.\n' +
+      '• Follow up debtors respectfully but firmly; remind before and after the due date.\n' +
+      '• When you borrow: borrow to produce (capital), not to consume; ensure profit covers the interest.\n' +
+      '• Avoid taking one loan to repay another (a debt spiral).\n' +
+      'If a debt is refused, a contract/receipt is evidence; a negotiated solution beats a quarrel.',
+    sources: [{ label: 'Akili KB — Biashara', ref: 'Usimamizi wa madeni' }],
   },
 ];
 

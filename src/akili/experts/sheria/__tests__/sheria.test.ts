@@ -50,4 +50,25 @@ describe('sheriaExpert.answer', () => {
     const data = a.data as { entry: string };
     expect(data.entry).toBe('msaada-wa-kisheria');
   });
+
+  it('retrieves child-rights for a maintenance query, with the Law of the Child source', async () => {
+    const a = await sheriaExpert.answer(q('haki za mtoto na matunzo ya watoto'));
+    const data = a.data as { entry: string };
+    expect(data.entry).toBe('haki-za-mtoto');
+    expect(a.sources!.some((s) => /Mtoto|Child/i.test(s.label))).toBe(true);
+  });
+
+  it('retrieves land entry for a title-deed query', async () => {
+    const a = await sheriaExpert.answer(q('namiliki ardhi na hatimiliki ya shamba'));
+    const data = a.data as { entry: string };
+    expect(data.entry).toBe('ardhi');
+    expect(a.sources!.some((s) => /Ardhi|Land/i.test(s.label))).toBe(true);
+  });
+
+  it('retrieves corruption entry and points to TAKUKURU', async () => {
+    const a = await sheriaExpert.answer(q('napenda kuripoti rushwa kwa takukuru'));
+    const data = a.data as { entry: string };
+    expect(data.entry).toBe('rushwa');
+    expect(a.sources!.some((s) => /TAKUKURU|PCCB/i.test(s.label))).toBe(true);
+  });
 });

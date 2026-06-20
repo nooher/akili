@@ -49,11 +49,21 @@ const SHERIA_CUES = [
   'mtumiaji', 'mlaji', 'mteja', 'bidhaa', 'huduma', 'ndoa', 'talaka', 'mirathi',
   'urithi', 'wosia', 'ajira', 'mfanyakazi', 'mwajiri', 'mkataba', 'mshahara',
   'kufukuzwa', 'likizo', 'ardhi', 'kumiliki', 'usajili',
+  // Kiswahili — added topics
+  'mtoto', 'watoto', 'malezi', 'matunzo', 'unyanyasaji', 'ukatili', 'jinsia',
+  'mwanamke', 'mke', 'kibali', 'hati', 'hatimiliki', 'pango', 'mpangaji',
+  'mwenye nyumba', 'rushwa', 'takukuru', 'kuandikisha', 'kura', 'uchaguzi',
+  'kupiga kura', 'mlemavu', 'ulemavu', 'gbv', 'kitambulisho', 'nida',
   // English
   'law', 'legal', 'rights', 'constitution', 'court', 'lawyer', 'advocate',
   'arrest', 'arrested', 'bail', 'consumer', 'marriage', 'divorce', 'inheritance',
   'will', 'employment', 'employee', 'employer', 'contract', 'wages', 'dismissal',
   'tenant', 'land', 'legal aid', 'sue', 'compensation',
+  // English — added topics
+  'child', 'children', 'custody', 'maintenance', 'abuse', 'violence', 'gender',
+  'woman', 'women', 'title deed', 'lease', 'landlord', 'rent', 'corruption',
+  'bribe', 'pcccb', 'vote', 'voting', 'election', 'register', 'disability',
+  'id card', 'birth certificate',
 ];
 
 // ── the curated knowledge base ──────────────────────────────────────────────────
@@ -220,6 +230,154 @@ const KB: KBEntry[] = [
     sources: [
       { label: 'Sheria ya Msaada wa Kisheria (Legal Aid Act 2017)' },
       { label: 'LHRC / WLAC' },
+    ],
+  },
+  {
+    id: 'haki-za-mtoto',
+    cues: ['mtoto', 'watoto', 'malezi', 'matunzo', 'child', 'children', 'custody', 'maintenance',
+      'cheti cha kuzaliwa', 'birth certificate', 'umri', 'ndoa ya mtoto'],
+    sw:
+      'Haki za mtoto (Sheria ya Mtoto):\n' +
+      '• Kila mtoto ana haki ya jina, uraia na CHETI CHA KUZALIWA (kisajiliwe RITA).\n' +
+      '• Haki ya kupata malezi, chakula, afya na elimu; wazazi wote wawili wana wajibu wa matunzo.\n' +
+      '• Kulindwa dhidi ya ukatili, kazi hatarishi, na ndoa za utotoni.\n' +
+      '• Maslahi bora ya mtoto (best interests) ndiyo kipimo cha kwanza katika maamuzi yote.\n' +
+      '• Mzazi anayekataa kutoa matunzo anaweza kushtakiwa; ustawi wa jamii (social welfare) husaidia.\n' +
+      'Migogoro ya malezi/matunzo hupelekwa mahakamani; ona afisa ustawi wa jamii au wakili.',
+    en:
+      'Rights of the child (Law of the Child Act):\n' +
+      '• Every child has a right to a name, nationality and a BIRTH CERTIFICATE (registered with RITA).\n' +
+      '• A right to care, food, health and education; both parents share the duty of maintenance.\n' +
+      '• Protection from violence, hazardous labour, and child marriage.\n' +
+      '• The child\'s best interests are the first consideration in every decision.\n' +
+      '• A parent who refuses maintenance can be taken to court; social welfare officers assist.\n' +
+      'Custody/maintenance disputes go to court; see a social welfare officer or a lawyer.',
+    sources: [
+      { label: 'Sheria ya Mtoto (Law of the Child Act 2009)' },
+      { label: 'RITA — Wakala wa Usajili, Ufilisi na Udhamini' },
+    ],
+  },
+  {
+    id: 'ukatili-jinsia',
+    cues: ['unyanyasaji', 'ukatili', 'jinsia', 'gbv', 'ubakaji', 'kupigwa', 'mwanamke', 'mke',
+      'violence', 'abuse', 'gender', 'rape', 'assault', 'domestic'],
+    sw:
+      'Ukatili wa kijinsia na unyanyasaji (GBV):\n' +
+      '• Ukatili wa kijinsia, ubakaji, na unyanyasaji majumbani ni MAKOSA YA JINAI.\n' +
+      '• Ripoti kwa polisi — Dawati la Jinsia na Watoto (Gender & Children\'s Desk) lipo vituoni vingi.\n' +
+      '• Tafuta huduma za afya haraka; muombe daktari kujaza FOMU YA PF3 kama ushahidi.\n' +
+      '• Hifadhi ushahidi (ujumbe, picha, mashahidi); usinawe/usibadilishe nguo kabla ya uchunguzi pale inapowezekana.\n' +
+      '• Madawati ya msaada (mfano simu za bure za kusaidia) na mashirika kama WLAC/TAWLA hutoa msaada wa siri.\n' +
+      'Usalama wako ni kipaumbele; ona polisi, kituo cha afya, au mtoa-msaada wa kisheria.',
+    en:
+      'Gender-based violence and abuse (GBV):\n' +
+      '• GBV, rape, and domestic violence are CRIMINAL OFFENCES.\n' +
+      '• Report to police — a Gender & Children\'s Desk exists at many stations.\n' +
+      '• Seek health care quickly; ask the doctor to complete a PF3 form as evidence.\n' +
+      '• Preserve evidence (messages, photos, witnesses); where possible do not wash/change clothes before examination.\n' +
+      '• Helplines and bodies like WLAC/TAWLA offer confidential support.\n' +
+      'Your safety comes first; see police, a health centre, or a legal-aid provider.',
+    sources: [
+      { label: 'Sheria ya Makosa ya Kujamiiana (SOSPA)' },
+      { label: 'Dawati la Jinsia na Watoto — Jeshi la Polisi' },
+      { label: 'WLAC / TAWLA' },
+    ],
+  },
+  {
+    id: 'ardhi',
+    cues: ['ardhi', 'kumiliki', 'hati', 'hatimiliki', 'shamba', 'kiwanja', 'mpaka', 'land',
+      'title deed', 'plot', 'boundary', 'kijiji', 'village land', 'hati ya kimila'],
+    sw:
+      'Ardhi na umiliki (misingi):\n' +
+      '• Ardhi yote Tanzania ni mali ya umma chini ya Rais kwa niaba ya wananchi; wewe hupewa HAKI YA MILKI (right of occupancy), si umiliki kamili.\n' +
+      '• Aina mbili: ardhi ya MJINI/HIFADHI (hati ya kawaida) na ardhi ya KIJIJI (hati ya kimila — CCRO).\n' +
+      '• Hakikisha una hati halali; thibitisha mipaka na umiliki kwenye ofisi ya ardhi/kijiji kabla ya kununua.\n' +
+      '• Sajili miamala ya ardhi; weka mikataba kwa maandishi na mashahidi.\n' +
+      '• Wanawake wana haki sawa ya kumiliki na kurithi ardhi.\n' +
+      'Migogoro ya ardhi hushughulikiwa na Mabaraza ya Ardhi (ngazi ya kijiji/kata) hadi Mahakama ya Ardhi.',
+    en:
+      'Land and ownership (basics):\n' +
+      '• All land in Tanzania is public land vested in the President for the people; you hold a RIGHT OF OCCUPANCY, not absolute ownership.\n' +
+      '• Two kinds: GENERAL/urban land (a granted title) and VILLAGE land (a customary title — CCRO).\n' +
+      '• Confirm a valid title; verify boundaries and ownership at the land/village office before buying.\n' +
+      '• Register land transactions; put agreements in writing with witnesses.\n' +
+      '• Women have an equal right to own and inherit land.\n' +
+      'Land disputes go through Land Tribunals (village/ward level) up to the Land Court.',
+    sources: [
+      { label: 'Sheria ya Ardhi (Land Act)' },
+      { label: 'Sheria ya Ardhi ya Vijiji (Village Land Act)' },
+    ],
+  },
+  {
+    id: 'pango-nyumba',
+    cues: ['pango', 'mpangaji', 'mwenye nyumba', 'kupanga', 'kodi ya nyumba', 'lease', 'rent',
+      'tenant', 'landlord', 'mkataba wa pango'],
+    sw:
+      'Kupanga nyumba (mpangaji na mwenye nyumba):\n' +
+      '• Wekeni MKATABA WA PANGO kwa maandishi: kodi, muda, dhamana (deposit), na nani analipa nini.\n' +
+      '• Mwenye nyumba hapaswi kumfukuza mpangaji kwa nguvu bila notisi/utaratibu wa kisheria.\n' +
+      '• Mpangaji ana wajibu wa kulipa kwa wakati na kutunza nyumba; mwenye nyumba ana wajibu wa matengenezo makubwa.\n' +
+      '• Toa/dai RISITI kwa kila malipo; hifadhi nakala ya mkataba.\n' +
+      '• Notisi ya kuhama itolewe kama ilivyokubaliwa kwenye mkataba.\n' +
+      'Mgogoro wa pango unaweza kupelekwa kwa baraza la usuluhishi/mahakama husika.',
+    en:
+      'Renting a home (tenant and landlord):\n' +
+      '• Put a LEASE in writing: rent, duration, deposit, and who pays for what.\n' +
+      '• A landlord may not forcibly evict a tenant without proper notice/legal process.\n' +
+      '• The tenant must pay on time and keep the home; the landlord handles major repairs.\n' +
+      '• Give/keep a RECEIPT for every payment; keep a copy of the lease.\n' +
+      '• Give notice to vacate as agreed in the lease.\n' +
+      'A rent dispute can go to the relevant tribunal/court.',
+    sources: [{ label: 'Sheria ya Ardhi (Land Act) — sehemu za upangishaji' }],
+  },
+  {
+    id: 'rushwa',
+    cues: ['rushwa', 'takukuru', 'hongo', 'corruption', 'bribe', 'pcccb', 'kuomba rushwa', 'report corruption'],
+    sw:
+      'Rushwa na jinsi ya kuripoti:\n' +
+      '• Kuomba, kutoa au kupokea RUSHWA ni kosa la jinai — kwa pande zote mbili.\n' +
+      '• Huna lazima kutoa rushwa kupata huduma ya umma ambayo ni haki yako.\n' +
+      '• Ripoti vitendo vya rushwa kwa TAKUKURU (Taasisi ya Kuzuia na Kupambana na Rushwa).\n' +
+      '• Toa maelezo sahihi: nani, lini, wapi, kiasi; hifadhi ushahidi wowote.\n' +
+      '• Watoa-taarifa (whistleblowers) wana ulinzi wa kisheria.\n' +
+      'Kwa huduma za umma, dai risiti rasmi na uulize ada halali zilizoidhinishwa.',
+    en:
+      'Corruption and how to report it:\n' +
+      '• Soliciting, giving or receiving a BRIBE is a criminal offence — on both sides.\n' +
+      '• You are not required to pay a bribe for a public service that is your right.\n' +
+      '• Report corruption to PCCB/PCCCB (the Prevention and Combating of Corruption Bureau — TAKUKURU).\n' +
+      '• Give specifics: who, when, where, how much; keep any evidence.\n' +
+      '• Whistleblowers have legal protection.\n' +
+      'For public services, demand an official receipt and ask for the approved, lawful fee.',
+    sources: [
+      { label: 'Sheria ya Kuzuia na Kupambana na Rushwa (PCCA 2007)' },
+      { label: 'TAKUKURU — PCCB' },
+    ],
+  },
+  {
+    id: 'haki-za-kiraia',
+    cues: ['kura', 'kupiga kura', 'uchaguzi', 'vote', 'voting', 'election', 'kuandikisha', 'register',
+      'kitambulisho', 'nida', 'mlemavu', 'ulemavu', 'disability', 'id card', 'civic'],
+    sw:
+      'Haki za kiraia (uraia, kura, vitambulisho):\n' +
+      '• Kupiga KURA ni haki ya kila raia mwenye sifa (umri wa miaka 18+); jiandikishe kwenye daftari la wapiga kura.\n' +
+      '• Kitambulisho cha taifa (NIDA) na cheti cha kuzaliwa ni nyaraka muhimu za utambuzi.\n' +
+      '• Uhuru wa kushiriki shughuli za kiraia, kuunda/kujiunga vyama, na kukosoa kwa amani.\n' +
+      '• Watu wenye ULEMAVU wana haki ya kupata huduma bila ubaguzi na kwa mazingira yanayofikika.\n' +
+      '• Huduma nyingi za serikali sasa zinapatikana mtandaoni — epuka madalali wanaodai rushwa.\n' +
+      'Kwa masuala ya uchaguzi wasiliana na Tume Huru ya Taifa ya Uchaguzi (INEC).',
+    en:
+      'Civic rights (citizenship, voting, IDs):\n' +
+      '• VOTING is a right of every qualified citizen (age 18+); register on the voters\' roll.\n' +
+      '• The national ID (NIDA) and birth certificate are key identity documents.\n' +
+      '• Freedom to take part in civic life, form/join associations, and criticise peacefully.\n' +
+      '• People with DISABILITIES have a right to services without discrimination and to accessibility.\n' +
+      '• Many government services are now online — avoid touts demanding bribes.\n' +
+      'For election matters contact the Independent National Electoral Commission (INEC).',
+    sources: [
+      { label: 'Katiba ya Tanzania', ref: 'Haki ya kushiriki shughuli za umma' },
+      { label: 'INEC — Tume Huru ya Taifa ya Uchaguzi' },
+      { label: 'NIDA — Mamlaka ya Vitambulisho vya Taifa' },
     ],
   },
 ];

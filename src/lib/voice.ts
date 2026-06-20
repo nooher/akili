@@ -84,6 +84,73 @@ export function pickSwahiliVoice<T extends VoiceLike>(voices: readonly T[]): T |
   return def ?? voices[0];
 }
 
+/** Minimal shape of `speechSynthesis` we rely on (keeps this module DOM-free). */
+export interface SynthLike {
+  getVoices?(): readonly VoiceLike[];
+  onvoiceschanged?: ((this: unknown, ev: unknown) => unknown) | null;
+  addEventListener?(type: string, cb: () => void): void;
+  removeEventListener?(type: string, cb: () => void): void;
+}
+
+/**
+ * Resolve the available synthesis voices, working around the well-known browser
+ * race where `getVoices()` returns `[]` on first call until the engine fires
+ * `voiceschanged` (Chrome especially). We try synchronously first; if empty we
+ * wait for the event (bounded by `timeoutMs`) and resolve with whatever we have.
+ *
+ * Pure-ish + injectable: pass a mock synth in tests, no DOM needed. Never throws
+ * and never rejects — the worst case is an empty array (caller picks no voice).
+ */
+export function loadVoices(
+  synth: SynthLike | undefined | null,
+  timeoutMs = 1500,
+  timer: (cb: () => void, ms: number) => unknown = setTimeout,
+): Promise<readonly VoiceLike[]> {
+  return new Promise((resolve) => {
+    if (!synth || typeof synth.getVoices !== 'function') {
+      resolve([]);
+      return;
+    }
+    const now = () => {
+      try {
+        return synth.getVoices?.() ?? [];
+      } catch {
+        return [];
+      }
+    };
+
+    const initial = now();
+    if (initial.length > 0) {
+      resolve(initial);
+      return;
+    }
+
+    let done = false;
+    const finish = (voices: readonly VoiceLike[]) => {
+      if (done) return;
+      done = true;
+      try {
+        synth.removeEventListener?.('voiceschanged', onChange);
+      } catch {
+        /* ignore */
+      }
+      if (synth.onvoiceschanged === onChange) synth.onvoiceschanged = null;
+      resolve(voices);
+    };
+    const onChange = () => finish(now());
+
+    try {
+      synth.addEventListener?.('voiceschanged', onChange);
+    } catch {
+      /* ignore */
+    }
+    // Some engines only support the `onvoiceschanged` property (not addEventListener).
+    if (typeof synth.addEventListener !== 'function') synth.onvoiceschanged = onChange;
+
+    timer(() => finish(now()), timeoutMs);
+  });
+}
+
 /**
  * Clean answer text for speech synthesis. The engine emits Swahili prose with
  * warning glyphs ("⚠"), simple markdown emphasis, bullet markers and citation

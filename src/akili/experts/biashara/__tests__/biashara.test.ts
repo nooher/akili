@@ -50,4 +50,23 @@ describe('biasharaExpert.answer', () => {
     expect(data.entry).toBe('kodi-tra');
     expect(a.sources!.some((s) => /TRA/i.test(s.label))).toBe(true);
   });
+
+  it('retrieves the business-plan entry for a planning query', async () => {
+    const a = await biasharaExpert.answer(q('nataka kuandaa mpango wa biashara'));
+    const data = a.data as { entry: string };
+    expect(data.entry).toBe('mpango-wa-biashara');
+  });
+
+  it('retrieves bookkeeping entry for a records/budget query', async () => {
+    const a = await biasharaExpert.answer(q('jinsi ya kuweka kumbukumbu na bajeti ya biashara'));
+    const data = a.data as { entry: string };
+    expect(data.entry).toBe('kumbukumbu-bajeti');
+  });
+
+  it('retrieves insurance entry and cites TIRA', async () => {
+    const a = await biasharaExpert.answer(q('bima ya biashara dhidi ya hatari ya moto'));
+    const data = a.data as { entry: string };
+    expect(data.entry).toBe('bima-hatari');
+    expect(a.sources!.some((s) => /TIRA/i.test(s.label))).toBe(true);
+  });
 });

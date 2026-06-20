@@ -26,8 +26,8 @@ describe('logistikiExpert.match — routing', () => {
 });
 
 describe('logistikiExpert.answer — Rubani brain', () => {
-  it('answers a duty question with text + sources', () => {
-    const a = logistikiExpert.answer(q('Compute duty for value 10000 at 25% in Tanzania'));
+  it('answers a duty question with text + sources', async () => {
+    const a = await logistikiExpert.answer(q('Compute duty for value 10000 at 25% in Tanzania'));
     expect(a.domain).toBe('logistiki');
     expect(a.text.sw.length).toBeGreaterThan(10);
     expect(a.sources?.some((s) => /Rubani/i.test(s.label))).toBe(true);

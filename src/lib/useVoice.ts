@@ -14,6 +14,7 @@ import {
   pickSwahiliVoice,
   preferredAsrLang,
   textForSpeech,
+  loadVoices,
   type VoiceLike,
 } from './voice';
 import { track } from './telemetry';
@@ -117,6 +118,26 @@ export interface UseTts {
 export function useTts(): UseTts {
   const [supported] = useState(() => supportsSpeechSynthesis(window));
   const [speaking, setSpeaking] = useState(false);
+  // Cached Swahili voice (resolved once voices load). null = none picked yet;
+  // false = resolved but no usable voice (let the engine choose by lang).
+  const voiceRef = useRef<SpeechSynthesisVoice | null | false>(null);
+
+  // Prime the voice list early: browsers (Chrome esp.) return [] from getVoices()
+  // until `voiceschanged` fires, so pick + cache the Swahili voice ahead of the
+  // first answer. Best-effort; never throws if synthesis is absent.
+  useEffect(() => {
+    if (!supported) return;
+    let alive = true;
+    const synth = getSpeechSynthesis(window);
+    void loadVoices(synth).then((voices) => {
+      if (!alive) return;
+      const v = pickSwahiliVoice(voices as SpeechSynthesisVoice[]);
+      voiceRef.current = (v as SpeechSynthesisVoice) ?? false;
+    });
+    return () => {
+      alive = false;
+    };
+  }, [supported]);
 
   const cancel = useCallback(() => {
     const synth = getSpeechSynthesis(window);
@@ -139,8 +160,14 @@ export function useTts(): UseTts {
       try {
         synth.cancel(); // never overlap
         const u = new SpeechSynthesisUtterance(text);
-        const voices: VoiceLike[] = synth.getVoices?.() ?? [];
-        const voice = pickSwahiliVoice(voices as SpeechSynthesisVoice[]);
+        // Prefer the primed voice; fall back to a fresh getVoices() in case it
+        // populated after mount, else let the engine pick by lang (sw-TZ).
+        let voice: VoiceLike | null =
+          voiceRef.current === false ? null : voiceRef.current;
+        if (!voice) {
+          const voices: VoiceLike[] = synth.getVoices?.() ?? [];
+          voice = pickSwahiliVoice(voices as SpeechSynthesisVoice[]);
+        }
         if (voice) {
           u.voice = voice as SpeechSynthesisVoice;
           if (voice.lang) u.lang = voice.lang;

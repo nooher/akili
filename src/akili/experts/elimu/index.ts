@@ -43,11 +43,18 @@ const ELIMU_CUES = [
   // Kiswahili — subjects
   'hesabu', 'hisabati', 'sayansi', 'fizikia', 'kemia', 'biolojia', 'jiografia',
   'historia', 'kiingereza', 'kiswahili somo', 'algebra', 'jiometri',
+  // Kiswahili — pathways & support
+  'chuo', 'chuo kikuu', 'udahili', 'kujiunga', 'heslb', 'mkopo wa elimu', 'ufaulu',
+  'kombo', 'ufundi', 'veta', 'nacte', 'tcu', 'tie', 'mtaala', 'insha', 'utungaji',
+  'msongo', 'mafadhaiko', 'kuandika',
   // English
   'education', 'school', 'student', 'teacher', 'class', 'form', 'subject', 'exam',
   'exams', 'study', 'learn', 'learning', 'pass', 'explain', 'definition', 'concept',
   'maths', 'math', 'mathematics', 'science', 'physics', 'chemistry', 'biology',
   'geography', 'history', 'revision', 'notes',
+  // English — pathways & support
+  'university', 'college', 'admission', 'enrol', 'loan', 'scholarship', 'vocational',
+  'curriculum', 'essay', 'writing', 'english', 'exam stress', 'anxiety', 'career',
 ];
 
 interface KBEntry {
@@ -171,6 +178,122 @@ const KB: KBEntry[] = [
       '• KASUKU — literature, books and reading guides.\n' +
       'Ask Akili anything; it routes you to the right expert (health, language, agriculture, law, business…).',
     sources: [{ label: 'Akili KB — Elimu', ref: 'Laetoli (Jifunze / SNIL / Kasuku)' }],
+  },
+  {
+    id: 'elimu-ya-juu',
+    cues: ['chuo', 'chuo kikuu', 'udahili', 'kujiunga', 'tcu', 'nacte', 'university', 'college',
+      'admission', 'enrol', 'a level', 'diploma', 'shahada', 'degree', 'baada ya kidato'],
+    sw:
+      'Elimu ya juu na udahili (baada ya sekondari):\n' +
+      '• Njia kuu: ASTASHAHADA/STASHAHADA (certificate/diploma) au SHAHADA (degree) vyuoni.\n' +
+      '• Vyuo vikuu husimamiwa na TCU; vyuo vya kati/ufundi husimamiwa na NACTE.\n' +
+      '• Udahili wa shahada hutegemea ufaulu wa A-Level (ACSEE) au sifa sawa; angalia masharti ya kozi.\n' +
+      '• Omba kupitia mfumo wa pamoja wa udahili (central admission) ndani ya muda; andaa vyeti halali.\n' +
+      '• Chagua kozi kwa kuangalia kipaji chako, soko la ajira, na gharama.\n' +
+      'Hakiki kozi/chuo kimetambuliwa na TCU/NACTE kabla ya kujiunga.',
+    en:
+      'Higher education and admission (after secondary):\n' +
+      '• Main routes: a CERTIFICATE/DIPLOMA or a DEGREE at colleges/universities.\n' +
+      '• Universities are regulated by TCU; technical colleges by NACTE.\n' +
+      '• Degree admission depends on A-Level (ACSEE) results or equivalent; check course requirements.\n' +
+      '• Apply through the central admission system within the deadline; prepare valid certificates.\n' +
+      '• Choose a course by your talent, the job market, and cost.\n' +
+      'Confirm a course/college is recognised by TCU/NACTE before enrolling.',
+    sources: [
+      { label: 'TCU — Tume ya Vyuo Vikuu Tanzania' },
+      { label: 'NACTE — Baraza la Taifa la Elimu ya Ufundi' },
+    ],
+  },
+  {
+    id: 'mkopo-heslb',
+    cues: ['heslb', 'mkopo wa elimu', 'mkopo', 'loan', 'scholarship', 'ufadhili', 'ada ya chuo',
+      'student loan', 'fees', 'gharama za chuo', 'bodi ya mikopo'],
+    sw:
+      'Mkopo wa elimu ya juu (HESLB):\n' +
+      '• HESLB hutoa mikopo kwa wanafunzi wa elimu ya juu wenye uhitaji, hasa kwa kozi za kipaumbele.\n' +
+      '• Omba mtandaoni kupitia mfumo wa HESLB ndani ya muda; jaza taarifa za kweli na ambatanisha vielelezo.\n' +
+      '• Mkopo HUREJESHWA baada ya kumaliza na kuanza kazi — ni deni, si zawadi.\n' +
+      '• Zingatia vigezo vya uhitaji (yatima, kipato cha familia, ulemavu) vinavyoweza kukupa kipaumbele.\n' +
+      '• Tafuta pia ufadhili (scholarships) wa serikali, mashirika na sekta binafsi.\n' +
+      'Thibitisha tarehe za mwisho na masharti kwenye tovuti rasmi ya HESLB.',
+    en:
+      'Higher-education loans (HESLB):\n' +
+      '• HESLB provides loans to needy higher-education students, especially for priority courses.\n' +
+      '• Apply online through the HESLB system within the deadline; give true information and attach evidence.\n' +
+      '• A loan is REPAID after you finish and start working — it is a debt, not a gift.\n' +
+      '• Note needs criteria (orphanhood, family income, disability) that may give priority.\n' +
+      '• Also look for scholarships from government, NGOs and the private sector.\n' +
+      'Confirm deadlines and terms on the official HESLB website.',
+    sources: [{ label: 'HESLB — Bodi ya Mikopo ya Wanafunzi wa Elimu ya Juu' }],
+  },
+  {
+    id: 'ufundi-veta',
+    cues: ['veta', 'ufundi', 'vocational', 'ujuzi', 'fundi', 'useremala', 'ushonaji', 'umeme',
+      'mekanika', 'skills', 'trade', 'mafunzo ya ufundi'],
+    sw:
+      'Mafunzo ya ufundi stadi (VETA):\n' +
+      '• VETA hutoa mafunzo ya ujuzi wa vitendo: useremala, umeme, mekanika, ushonaji, upishi, TEHAMA, n.k.\n' +
+      '• Ni njia nzuri kwa anayependa kazi za mikono au kujiajiri — soko la mafundi ni kubwa.\n' +
+      '• Mafunzo huwa ya muda mfupi hadi miaka kadhaa; baadhi hutoa vyeti vinavyotambulika kitaifa (NVA).\n' +
+      '• Sifa za kujiunga ni nafuu kuliko chuo kikuu; baadhi hupokea hata waliomaliza darasa la saba.\n' +
+      '• Ujuzi pamoja na elimu ya biashara hukuwezesha kuanzisha kazi yako mwenyewe.\n' +
+      'Tafuta kituo cha VETA kilicho karibu na uangalie kozi zinazotolewa.',
+    en:
+      'Vocational training (VETA):\n' +
+      '• VETA teaches practical skills: carpentry, electrical, mechanics, tailoring, cookery, ICT, etc.\n' +
+      '• A great route for hands-on work or self-employment — demand for skilled artisans is high.\n' +
+      '• Courses run from short to a few years; some give nationally recognised certificates (NVA).\n' +
+      '• Entry requirements are lighter than university; some take even Standard 7 leavers.\n' +
+      '• Skills plus business basics let you start your own trade.\n' +
+      'Find a nearby VETA centre and check the courses offered.',
+    sources: [{ label: 'VETA — Mamlaka ya Elimu na Mafunzo ya Ufundi Stadi' }],
+  },
+  {
+    id: 'kuandika-insha',
+    cues: ['insha', 'utungaji', 'kuandika', 'essay', 'writing', 'composition', 'aya', 'paragraph',
+      'lugha', 'utungo', 'andika insha'],
+    sw:
+      'Kuandika insha vizuri:\n' +
+      '• Panga kabla: UTANGULIZI (wazo kuu), KIINI (hoja kwa aya), na HITIMISHO (muhtasari/maoni).\n' +
+      '• Aya moja = wazo moja; anza na sentensi-mwongozo, kisha eleza na toa mfano.\n' +
+      '• Tumia lugha sahihi: alama za uakifishaji, sarufi, na maneno-unganishi (kwa hiyo, hata hivyo, mfano).\n' +
+      '• Jibu SWALI hasa lililoulizwa; soma maagizo mara mbili.\n' +
+      '• Soma tena ukimaliza ili kurekebisha makosa; andika kwa usafi.\n' +
+      'Kwa Kiswahili fasaha na miongozo ya uandishi, tumia Jifunze na Kasuku.',
+    en:
+      'Writing a good essay:\n' +
+      '• Plan first: INTRODUCTION (main idea), BODY (one argument per paragraph), CONCLUSION (summary/opinion).\n' +
+      '• One paragraph = one idea; start with a topic sentence, then explain and give an example.\n' +
+      '• Use correct language: punctuation, grammar, and linking words (therefore, however, for example).\n' +
+      '• Answer the exact QUESTION asked; read the instructions twice.\n' +
+      '• Re-read at the end to fix mistakes; write neatly.\n' +
+      'For polished Swahili and writing guides, use Jifunze and Kasuku.',
+    sources: [
+      { label: 'TIE — Taasisi ya Elimu Tanzania', ref: 'Mtaala wa lugha' },
+      { label: 'Akili KB — Elimu' },
+    ],
+  },
+  {
+    id: 'msongo-mitihani',
+    cues: ['msongo', 'mafadhaiko', 'exam stress', 'anxiety', 'hofu', 'wasiwasi', 'kuchoka',
+      'shinikizo', 'stress', 'kushindwa'],
+    sw:
+      'Kukabili msongo wa mitihani:\n' +
+      '• Anza maandalizi mapema ili kuepuka kuvuruga (cramming) usiku wa mwisho.\n' +
+      '• Gawa masomo katika vipande vidogo; sherehekea hatua ndogo unazofikia.\n' +
+      '• Lala vya kutosha, kula vizuri, na fanya mazoezi mepesi — ubongo unahitaji mapumziko.\n' +
+      '• Tumia mbinu za kupumua na mapumziko mafupi (mfano dakika 25 soma, 5 pumzika).\n' +
+      '• Zungumza na mwalimu, mzazi au rafiki ukihisi shinikizo kupita kiasi; si dalili ya udhaifu.\n' +
+      'Mtihani mmoja hauamui maisha yako yote — fanya bidii, lakini tunza afya yako ya akili.',
+    en:
+      'Coping with exam stress:\n' +
+      '• Start preparing early to avoid last-night cramming.\n' +
+      '• Break study into small chunks; celebrate small milestones.\n' +
+      '• Sleep enough, eat well, and do light exercise — the brain needs rest.\n' +
+      '• Use breathing techniques and short breaks (e.g. study 25 min, rest 5).\n' +
+      '• Talk to a teacher, parent or friend if pressure feels overwhelming; it is not weakness.\n' +
+      'One exam does not decide your whole life — work hard, but protect your mental health.',
+    sources: [{ label: 'Akili KB — Elimu', ref: 'Ustawi wa mwanafunzi' }],
   },
 ];
 

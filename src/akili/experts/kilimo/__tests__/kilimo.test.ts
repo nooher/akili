@@ -48,4 +48,23 @@ describe('kilimoExpert.answer', () => {
     const data = a.data as { entry: string };
     expect(data.entry).toBe('kahawa-korosho');
   });
+
+  it('retrieves the poultry/livestock entry for a chicken query', async () => {
+    const a = await kilimoExpert.answer(q('ufugaji bora wa kuku na chanjo'));
+    const data = a.data as { entry: string };
+    expect(data.entry).toBe('mifugo-kuku');
+    expect(a.sources!.some((s) => /Mifugo/i.test(s.label))).toBe(true);
+  });
+
+  it('retrieves the horticulture entry for a vegetables query', async () => {
+    const a = await kilimoExpert.answer(q('kilimo cha mboga na bustani ya nyanya'));
+    const data = a.data as { entry: string };
+    expect(data.entry).toBe('mboga-bustani');
+  });
+
+  it('retrieves extension entry for an inputs/subsidy query', async () => {
+    const a = await kilimoExpert.answer(q('huduma za ugani na ruzuku ya pembejeo'));
+    const data = a.data as { entry: string };
+    expect(data.entry).toBe('ugani-pembejeo');
+  });
 });

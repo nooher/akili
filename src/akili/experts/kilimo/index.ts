@@ -42,11 +42,19 @@ const KILIMO_CUES = [
   'mahindi', 'mpunga', 'mchele', 'mihogo', 'maharage', 'karanga', 'alizeti',
   'pamba', 'kahawa', 'korosho', 'chai', 'tumbaku', 'ndizi', 'viazi', 'mboga',
   'matunda', 'mifugo', 'ng ombe', 'kuku', 'mbuzi',
+  // Kiswahili — added
+  'bustani', 'nyanya', 'kitunguu', 'kabichi', 'bilinganya', 'pilipili', 'tikiti',
+  'ufugaji', 'maziwa', 'nyama', 'mayai', 'samaki', 'ufugaji wa samaki', 'nyuki',
+  'asali', 'ugani', 'pembejeo', 'ruzuku', 'mboji', 'kilimo hai', 'matandazo',
   // English
   'agriculture', 'farm', 'farmer', 'farming', 'crop', 'crops', 'plant', 'planting',
   'seed', 'seeds', 'fertilizer', 'fertiliser', 'manure', 'pest', 'pests',
   'harvest', 'storage', 'season', 'rains', 'soil', 'market', 'maize', 'rice',
   'cassava', 'beans', 'coffee', 'cashew', 'cotton', 'livestock', 'irrigation',
+  // English — added
+  'vegetables', 'tomato', 'onion', 'horticulture', 'poultry', 'chicken', 'goat',
+  'cattle', 'dairy', 'milk', 'fish', 'aquaculture', 'beekeeping', 'honey',
+  'compost', 'organic', 'mulch', 'extension', 'subsidy', 'sunflower', 'groundnuts',
 ];
 
 interface KBEntry {
@@ -192,6 +200,131 @@ const KB: KBEntry[] = [
     sources: [
       { label: 'Wizara ya Kilimo' },
       { label: 'Bodi ya Usimamizi wa Stakabadhi za Ghala (WRRB)' },
+    ],
+  },
+  {
+    id: 'mboga-bustani',
+    cues: ['mboga', 'bustani', 'nyanya', 'kitunguu', 'kabichi', 'pilipili', 'bilinganya',
+      'vegetables', 'tomato', 'onion', 'horticulture', 'kitalu', 'umwagiliaji wa matone'],
+    sw:
+      'Mboga za majani na bustani (kilimo cha bustani):\n' +
+      '• Mboga huleta kipato cha haraka — hukomaa ndani ya wiki chache hadi miezi michache.\n' +
+      '• Andaa KITALU chenye udongo laini wenye mboji; hamishia miche (nyanya, kabichi, vitunguu) shambani ikifikia urefu sahihi.\n' +
+      '• Mwagilia mara kwa mara; umwagiliaji wa MATONE (drip) huokoa maji na hupunguza magonjwa.\n' +
+      '• Zungusha mboga na epuka kupanda jamii moja mahali pamoja kila msimu (kuzuia wadudu/magonjwa).\n' +
+      '• Vuna asubuhi/jioni na peleka sokoni haraka — mboga huharibika upesi.\n' +
+      'Mboga zinafaa hata kwenye eneo dogo karibu na nyumbani kwa lishe na biashara.',
+    en:
+      'Vegetables and gardening (horticulture):\n' +
+      '• Vegetables bring quick income — they mature in a few weeks to a few months.\n' +
+      '• Prepare a NURSERY with fine, compost-rich soil; transplant seedlings (tomato, cabbage, onion) at the right height.\n' +
+      '• Water regularly; DRIP irrigation saves water and reduces disease.\n' +
+      '• Rotate vegetables and avoid planting the same family in one place each season (to curb pests/disease).\n' +
+      '• Harvest morning/evening and get to market fast — vegetables spoil quickly.\n' +
+      'Vegetables suit even a small plot near the home, for nutrition and income.',
+    sources: [
+      { label: 'Wizara ya Kilimo', ref: 'Kilimo cha bustani (horticulture)' },
+      { label: 'TAHA — Chama cha Wadau wa Kilimo cha Bustani' },
+    ],
+  },
+  {
+    id: 'mifugo-kuku',
+    cues: ['mifugo', 'kuku', 'ng ombe', 'mbuzi', 'ufugaji', 'maziwa', 'nyama', 'mayai',
+      'poultry', 'chicken', 'cattle', 'goat', 'dairy', 'milk', 'chanjo', 'banda'],
+    sw:
+      'Ufugaji bora (kuku, mbuzi, ng\'ombe):\n' +
+      '• KUKU: anza na idadi ndogo; toa BANDA safi, kavu na lenye hewa; chanja dhidi ya mdondo (Newcastle) na kideri.\n' +
+      '• Toa chakula bora na maji safi kila siku; tenga wagonjwa ili kuzuia maambukizi.\n' +
+      '• MBUZI/NG\'OMBE: hakikisha malisho/maji ya kutosha, ogesha dhidi ya kupe, na kinga minyoo.\n' +
+      '• NG\'OMBE WA MAZIWA: usafi wa kukamua na kuhifadhi maziwa ni muhimu kwa bei na afya.\n' +
+      '• Weka kumbukumbu za chanjo, uzazi na gharama; wasiliana na afisa MIFUGO/mhudumu wa mifugo.\n' +
+      'Chanjo na usafi wa banda ni nafuu kuliko kutibu mlipuko wa ugonjwa.',
+    en:
+      'Better livestock keeping (poultry, goats, cattle):\n' +
+      '• POULTRY: start small; provide a clean, dry, airy house; vaccinate against Newcastle and fowl pox.\n' +
+      '• Give good feed and clean water daily; isolate sick birds to stop spread.\n' +
+      '• GOATS/CATTLE: ensure enough pasture/water, dip against ticks, and deworm.\n' +
+      '• DAIRY CATTLE: clean milking and storage matter for price and health.\n' +
+      '• Keep records of vaccinations, births and costs; consult a LIVESTOCK officer/para-vet.\n' +
+      'Vaccination and a clean house are cheaper than treating a disease outbreak.',
+    sources: [
+      { label: 'Wizara ya Mifugo na Uvuvi' },
+      { label: 'Bodi ya Maziwa Tanzania (TDB)' },
+    ],
+  },
+  {
+    id: 'ufugaji-samaki-nyuki',
+    cues: ['samaki', 'ufugaji wa samaki', 'bwawa', 'nyuki', 'asali', 'mizinga', 'fish',
+      'aquaculture', 'beekeeping', 'honey', 'fish pond'],
+    sw:
+      'Ufugaji wa samaki na nyuki (kipato cha ziada):\n' +
+      '• SAMAKI: chimba BWAWA mahali penye maji ya kutosha; perege (tilapia) na kambare hufaa kwa wengi.\n' +
+      '• Weka vifaranga vyenye afya, lisha kwa kiasi, na badilisha/safisha maji kuepuka magonjwa.\n' +
+      '• NYUKI: weka MIZINGA mahali tulivu, penye maua na maji karibu; vaa kinga wakati wa kurina.\n' +
+      '• Asali, nta na uchavushaji wa mazao ni faida za ufugaji nyuki; soko la asali halisi ni kubwa.\n' +
+      '• Anza kidogo, jifunze, kisha ongeza mabwawa/mizinga kadiri unavyopata uzoefu.\n' +
+      'Wasiliana na afisa UVUVI/maliasili kwa mbinu na vibali pale vinapohitajika.',
+    en:
+      'Fish and bee keeping (extra income):\n' +
+      '• FISH: dig a POND where water is sufficient; tilapia and catfish suit many farmers.\n' +
+      '• Stock healthy fingerlings, feed moderately, and refresh/clean water to avoid disease.\n' +
+      '• BEES: place HIVES in a calm spot with flowers and water nearby; wear protection when harvesting.\n' +
+      '• Honey, wax and crop pollination are the gains of beekeeping; demand for real honey is high.\n' +
+      '• Start small, learn, then add ponds/hives as you gain experience.\n' +
+      'Consult a FISHERIES/natural-resources officer for methods and any required permits.',
+    sources: [
+      { label: 'Wizara ya Mifugo na Uvuvi', ref: 'Ufugaji wa samaki (aquaculture)' },
+      { label: 'Wakala wa Huduma za Misitu Tanzania (TFS)', ref: 'Ufugaji nyuki' },
+    ],
+  },
+  {
+    id: 'udongo-mboji',
+    cues: ['udongo', 'mboji', 'kilimo hai', 'matandazo', 'rutuba', 'soil', 'compost', 'organic',
+      'mulch', 'kupima udongo', 'soil health'],
+    sw:
+      'Afya ya udongo na mboji (rutuba endelevu):\n' +
+      '• Udongo wenye afya ndio msingi wa mavuno — utunze kama mtaji.\n' +
+      '• Tengeneza MBOJI kutoka mabaki ya mazao, samadi na majani; hurutubisha udongo bila gharama kubwa.\n' +
+      '• Weka MATANDAZO (mulch) kuzuia upotevu wa maji, kupunguza magugu na kulinda udongo.\n' +
+      '• Zungusha mazao na panda jamii ya mikunde (maharage, kunde) ili kuongeza naitrojeni.\n' +
+      '• Epuka kuchoma mabaki ya shamba na kulima kupita kiasi — huharibu rutuba na kusababisha mmomonyoko.\n' +
+      'Pima udongo pale inapowezekana ili kujua aina sahihi ya mbolea/marekebisho.',
+    en:
+      'Soil health and compost (lasting fertility):\n' +
+      '• Healthy soil is the basis of yield — treat it as capital.\n' +
+      '• Make COMPOST from crop residues, manure and leaves; it enriches soil cheaply.\n' +
+      '• Use MULCH to cut water loss, suppress weeds and protect the soil.\n' +
+      '• Rotate crops and plant legumes (beans, cowpeas) to add nitrogen.\n' +
+      '• Avoid burning residues and over-tilling — they destroy fertility and cause erosion.\n' +
+      'Test your soil where possible to know the right fertiliser/amendment.',
+    sources: [
+      { label: 'Wizara ya Kilimo', ref: 'Afya ya udongo na rutuba' },
+      { label: 'TARI — Taasisi ya Utafiti wa Kilimo Tanzania' },
+    ],
+  },
+  {
+    id: 'ugani-pembejeo',
+    cues: ['ugani', 'afisa ugani', 'pembejeo', 'ruzuku', 'extension', 'subsidy', 'msaada wa kilimo',
+      'vocha', 'inputs', 'mkopo wa kilimo', 'taarifa za kilimo'],
+    sw:
+      'Huduma za ugani na pembejeo (wapi kupata msaada):\n' +
+      '• AFISA UGANI wa kata/kijiji hutoa ushauri wa bure: aina za mbegu, mbolea, na udhibiti wa wadudu kwa eneo lako.\n' +
+      '• Nunua PEMBEJEO (mbegu, mbolea, dawa) kutoka mawakala walioidhinishwa; epuka bidhaa bandia.\n' +
+      '• Serikali mara nyingine hutoa RUZUKU/vocha za pembejeo kwa wakulima — uliza ofisi ya kilimo ya wilaya.\n' +
+      '• Jiunge na VIKUNDI/ushirika (AMCOS) ili kupata pembejeo, mikopo na soko kwa pamoja kwa bei nafuu.\n' +
+      '• Fuata utafiti wa TARI na taarifa za masoko ili kufanya maamuzi sahihi.\n' +
+      'Ushauri wa afisa ugani ni nafuu na hupunguza hasara za kubahatisha.',
+    en:
+      'Extension services and inputs (where to get help):\n' +
+      '• A ward/village EXTENSION OFFICER gives free advice: seed varieties, fertiliser, and pest control for your area.\n' +
+      '• Buy INPUTS (seed, fertiliser, chemicals) from authorised agents; avoid fake products.\n' +
+      '• Government sometimes offers input SUBSIDIES/vouchers to farmers — ask the district agriculture office.\n' +
+      '• Join GROUPS/cooperatives (AMCOS) to access inputs, credit and markets together at better prices.\n' +
+      '• Follow TARI research and market information to make good decisions.\n' +
+      'Extension advice is cheap and reduces the losses of guesswork.',
+    sources: [
+      { label: 'Wizara ya Kilimo', ref: 'Huduma za ugani' },
+      { label: 'TARI — Taasisi ya Utafiti wa Kilimo Tanzania' },
     ],
   },
 ];

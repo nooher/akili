@@ -35,6 +35,7 @@ describe('domainLabel', () => {
       kilimo: 'Kilimo',
       elimu: 'Elimu',
       biashara: 'Biashara',
+      logistiki: 'Logistiki',
       snil: 'SNIL',
       jumla: 'Jumla',
     };

@@ -49,4 +49,24 @@ describe('elimuExpert.answer', () => {
     const data = a.data as { entry: string };
     expect(data.entry).toBe('mbinu-za-kusoma');
   });
+
+  it('retrieves the student-loan entry and cites HESLB', async () => {
+    const a = await elimuExpert.answer(q('mkopo wa elimu ya juu wa heslb'));
+    const data = a.data as { entry: string };
+    expect(data.entry).toBe('mkopo-heslb');
+    expect(a.sources!.some((s) => /HESLB/i.test(s.label))).toBe(true);
+  });
+
+  it('retrieves higher-education entry and cites TCU/NACTE', async () => {
+    const a = await elimuExpert.answer(q('udahili wa chuo kikuu baada ya kidato cha sita'));
+    const data = a.data as { entry: string };
+    expect(data.entry).toBe('elimu-ya-juu');
+    expect(a.sources!.some((s) => /TCU|NACTE/i.test(s.label))).toBe(true);
+  });
+
+  it('retrieves vocational entry for a VETA query', async () => {
+    const a = await elimuExpert.answer(q('mafunzo ya ufundi stadi veta'));
+    const data = a.data as { entry: string };
+    expect(data.entry).toBe('ufundi-veta');
+  });
 });

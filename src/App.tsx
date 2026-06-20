@@ -294,15 +294,16 @@ export function App() {
       asr.stop();
       return;
     }
-    asr.start(
-      (finalText) => {
-        // Merge final transcript into the draft (append, trimmed).
-        setDraft((d) => (d.trim() ? `${d.trim()} ${finalText}` : finalText));
-        requestAnimationFrame(() => taRef.current?.focus());
-      },
-      (interim) => setDraft(interim),
-    );
-  }, [asr]);
+    // Speak-to-ask: on the final transcript, fill the input and auto-send so
+    // low-literacy / hands-free users never have to find the send button.
+    // interimResults stay off (no onInterim) for a crisp, single result.
+    asr.start((finalText) => {
+      const spoken = finalText.trim();
+      if (!spoken) return;
+      setDraft(spoken);
+      void send(spoken);
+    });
+  }, [asr, send]);
 
   const onToggleMute = useCallback(() => {
     setMuted((prev) => {
