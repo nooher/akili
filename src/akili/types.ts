@@ -14,6 +14,7 @@ export type AkiliDomain =
   | 'kilimo' //  agriculture for smallholder farmers
   | 'elimu' //  study help / education system
   | 'biashara' //  small business & financial literacy
+  | 'logistiki' //  logistics & trade (CargoLink Rubani, vendored)
   | 'snil' //  SNIL-as-tool: Swahili intent → code → execution
   | 'jumla'; //  general / about-Akili / fallback
 

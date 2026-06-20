@@ -24,6 +24,7 @@
   --d-fasihi: #8a4d9e; /* plum */
   --d-lugha:  #2f6f8f; /* teal-blue */
   --d-snil:   #c9962f; /* gold */
+  --d-logistiki: #047857; /* CargoLink emerald */
   --d-jumla:  #6b6354; /* warm grey */
 
   --radius:   14px;
@@ -444,6 +445,7 @@ kbd {
 .badge--fasihi { background: var(--d-fasihi); }
 .badge--lugha  { background: var(--d-lugha); }
 .badge--snil   { background: var(--d-snil); color: var(--green-deep); }
+.badge--logistiki { background: var(--d-logistiki); }
 .badge--jumla  { background: var(--d-jumla); }
 
 /* Confidence pill */
@@ -662,6 +664,7 @@ kbd {
 .mini-chip--fasihi { background: var(--d-fasihi); }
 .mini-chip--lugha  { background: var(--d-lugha); }
 .mini-chip--snil   { background: var(--d-snil); color: var(--green-deep); }
+.mini-chip--logistiki { background: var(--d-logistiki); }
 .mini-chip--jumla  { background: var(--d-jumla); }
 
 .composer-form {

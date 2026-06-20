@@ -24,6 +24,7 @@ export {
   kilimoExpert,
   elimuExpert,
   biasharaExpert,
+  logistikiExpert,
   snilExpert,
   jumlaExpert,
 } from './akili/index';

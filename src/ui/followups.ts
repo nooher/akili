@@ -46,6 +46,11 @@ const FOLLOWUPS: Record<AkiliDomain, string[]> = {
     'Nipange bajeti vipi?',
     'Napata mtaji wapi?',
   ],
+  logistiki: [
+    'Nikadirie ushuru wa forodha',
+    'Mombasa au Dar nichague ipi?',
+    'Nyaraka za kuondolea mzigo ni zipi?',
+  ],
   snil: [
     'Nionyeshe Python yake',
     'Nieleze namna ilivyofanya kazi',

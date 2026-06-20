@@ -13,6 +13,8 @@ export function domainLabel(domain: AkiliDomain): string {
       return 'Fasihi';
     case 'lugha':
       return 'Lugha';
+    case 'logistiki':
+      return 'Logistiki';
     case 'snil':
       return 'SNIL';
     case 'jumla':
@@ -28,7 +30,7 @@ export function domainLabel(domain: AkiliDomain): string {
  * lives in CSS while the mapping stays testable.
  */
 export function domainClass(domain: AkiliDomain): string {
-  const known: AkiliDomain[] = ['afya', 'fasihi', 'lugha', 'snil', 'jumla'];
+  const known: AkiliDomain[] = ['afya', 'fasihi', 'lugha', 'logistiki', 'snil', 'jumla'];
   return known.includes(domain) ? domain : 'jumla';
 }
 
