@@ -3,6 +3,8 @@
 // Jumla, renders provenance + SNIL traces, no external LLM.
 
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useRef,
@@ -10,6 +12,8 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from 'react';
+
+const AdminV2 = lazy(() => import('./AdminV2'));
 import { akili, createAkiliSession, type AkiliSession } from './akili';
 import type { AkiliAnswer, AkiliDomain } from './akili/types';
 import {
@@ -83,6 +87,17 @@ function relativeTime(iso: string): string {
 // ── component ─────────────────────────────────────────────────────────────────
 
 export function App() {
+  // Hash-based admin deep-link: visiting #admin renders the canonical
+  // @laetoli/admin shell in library mode. Same UX as the rest of the
+  // Laetoli portfolio's admin v2 surfaces.
+  if (typeof window !== 'undefined' && window.location.hash === '#admin') {
+    return (
+      <Suspense fallback={<div style={{ padding: 24, color: '#6a6760' }}>Inafungua admin…</div>}>
+        <AdminV2 />
+      </Suspense>
+    );
+  }
+
   // The active conversation is resolved on first render: legacy single-session
   // history is migrated, the stored "current" id is honoured, else the newest /
   // a fresh session is opened. Each session has its OWN scoped memory store.

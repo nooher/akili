@@ -27,6 +27,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@laetoli/admin": "github:nooher/laetoli-admin",
     "@laetoli/snil": "github:nooher/snil-core",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
