@@ -1,7 +1,143 @@
+// src/akili/memory.ts
+function emptyMemory() {
+  return { entities: {}, recentTurns: [] };
+}
+var ANAPHORA_CUES = [
+  // Kiswahili pronouns / referents
+  "yake",
+  "yao",
+  "lake",
+  "wake",
+  "zake",
+  "hiyo",
+  "hilo",
+  "huo",
+  "hizo",
+  "hizi",
+  "hapo",
+  "huko",
+  "pale",
+  "hapohapo",
+  // Kiswahili follow-up phrasings
+  "vipi kuhusu",
+  "je kuhusu",
+  "na je",
+  "na vipi",
+  "sasa je",
+  "kuhusu hilo",
+  // English
+  "there",
+  "that",
+  "it",
+  "its",
+  "them",
+  "those",
+  "what about",
+  "how about",
+  "and the",
+  "and its",
+  "and that",
+  "same",
+  "then"
+];
+var STRIP = /[^\p{L}\p{N}']+/gu;
+function normalizeText(s) {
+  return (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP, " ").replace(/\s+/g, " ").trim();
+}
+function hasCue(paddedHay, cue) {
+  return paddedHay.includes(` ${cue} `);
+}
+function looksLikeFollowUp(text) {
+  const n = normalizeText(text);
+  if (!n) return false;
+  const words = n.split(" ").filter(Boolean);
+  if (words.length === 0 || words.length > 8) return false;
+  const padded = ` ${n} `;
+  return ANAPHORA_CUES.some((c) => hasCue(padded, c));
+}
+function absorb(out, ents) {
+  if (!ents || typeof ents !== "object") return;
+  for (const [k, v] of Object.entries(ents)) {
+    if (typeof v === "string" && v.trim()) out[k] = v;
+    else if (typeof v === "number") out[k] = String(v);
+  }
+}
+function entitiesFromAnswer(answer) {
+  const out = {};
+  const data = answer.data;
+  if (data && typeof data === "object") {
+    const d = data;
+    absorb(out, d.entities);
+    if (d.data && typeof d.data === "object") {
+      absorb(out, d.data.entities);
+    }
+  }
+  const topic = topicFromAnswer(answer);
+  if (topic) out.topic = topic;
+  return out;
+}
+function topicFromAnswer(answer) {
+  const data = answer.data;
+  if (data && typeof data === "object") {
+    const t = data.topic;
+    if (typeof t === "string" && t.trim()) return t;
+  }
+  return void 0;
+}
+function updateMemory(prev, query, answer, maxTurns = 8) {
+  const merged = { ...prev.entities, ...entitiesFromAnswer(answer) };
+  const topic = topicFromAnswer(answer);
+  const turn = {
+    domain: answer.domain,
+    expert: answer.expert,
+    text: (query.text ?? "").trim(),
+    ...topic ? { topic } : {}
+  };
+  return {
+    lastDomain: answer.domain,
+    lastExpert: answer.expert,
+    ...topic ? { lastTopic: topic } : {},
+    entities: merged,
+    recentTurns: [...prev.recentTurns, turn].slice(-maxTurns)
+  };
+}
+function injectContext(base, memory) {
+  const ctx = { ...base ?? {} };
+  ctx.memory = {
+    lastDomain: memory.lastDomain,
+    lastExpert: memory.lastExpert,
+    lastTopic: memory.lastTopic,
+    entities: memory.entities,
+    recentTurns: memory.recentTurns
+  };
+  if (memory.lastDomain === "logistiki" && !ctx.logistics) {
+    ctx.logistics = {
+      lastTopic: memory.lastTopic,
+      entities: memory.entities
+    };
+  }
+  return ctx;
+}
+
 // src/akili/router.ts
 function normalize(q) {
   if (typeof q === "string") return { text: q, lang: "sw" };
   return { lang: "sw", ...q, text: q.text ?? "" };
+}
+function readBias(query) {
+  const b = query.context?.bias;
+  if (b && typeof b.domain === "string" && typeof b.boost === "number") {
+    return {
+      domain: b.domain,
+      boost: b.boost,
+      floor: typeof b.floor === "number" ? b.floor : 0
+    };
+  }
+  return void 0;
+}
+function applyBias(score6, isPriorDomain, bias) {
+  if (!bias || !isPriorDomain) return score6;
+  return Math.min(1, Math.max(score6 + bias.boost, bias.floor));
 }
 function emptyRegistryAnswer() {
   return {
@@ -21,15 +157,17 @@ function createAkili(experts = []) {
   const registry = [...experts];
   async function dispatch(query) {
     if (registry.length === 0) return emptyRegistryAnswer();
+    const bias = readBias(query);
     const scored = registry.map((expert, order) => {
-      let score5 = 0;
+      let score6 = 0;
       try {
         const s = expert.match(query);
-        score5 = Number.isFinite(s) ? Math.max(0, Math.min(1, s)) : 0;
+        score6 = Number.isFinite(s) ? Math.max(0, Math.min(1, s)) : 0;
       } catch {
-        score5 = 0;
+        score6 = 0;
       }
-      return { expert, score: score5, order };
+      score6 = applyBias(score6, !!bias && expert.domain === bias.domain, bias);
+      return { expert, score: score6, order };
     });
     const candidates = scored.filter((c) => c.score > 0).sort((a, b) => b.score - a.score || a.order - b.order);
     const fb = fallbackExpert(registry);
@@ -62,22 +200,36 @@ function createAkili(experts = []) {
     ask: (q) => dispatch(normalize(q))
   };
 }
+var FOLLOWUP_BOOST = 0.25;
+var FOLLOWUP_FLOOR = 0.62;
 function createAkiliSession(akili2, maxTurns = 8) {
   let exchanges = [];
+  let mem = emptyMemory();
   return {
     async ask(q) {
       const query = normalize(q);
-      const withCtx = {
-        ...query,
-        context: { ...query.context ?? {}, history: exchanges }
-      };
+      const context = injectContext(
+        { ...query.context ?? {}, history: exchanges },
+        mem
+      );
+      if (mem.lastDomain && looksLikeFollowUp(query.text)) {
+        context.bias = {
+          domain: mem.lastDomain,
+          boost: FOLLOWUP_BOOST,
+          floor: FOLLOWUP_FLOOR
+        };
+      }
+      const withCtx = { ...query, context };
       const answer = await akili2.ask(withCtx);
       exchanges = [...exchanges, { query, answer }].slice(-maxTurns);
+      mem = updateMemory(mem, query, answer, maxTurns);
       return answer;
     },
     history: () => [...exchanges],
+    memory: () => mem,
     reset: () => {
       exchanges = [];
+      mem = emptyMemory();
     }
   };
 }
@@ -142,7 +294,7 @@ var Makosa = {
   kugawanyaNaSifuri: (line) => new SnilError("Huwezi kugawanya kwa sifuri.", line, "kutekeleza")
 };
 function tokenize(source) {
-  const tokens5 = [];
+  const tokens7 = [];
   let i = 0;
   let line = 1;
   let col = 1;
@@ -159,9 +311,9 @@ function tokenize(source) {
   };
   const peek = (k = 0) => source[i + k] ?? "";
   const pushNewline = (ln, c) => {
-    const last = tokens5[tokens5.length - 1];
+    const last = tokens7[tokens7.length - 1];
     if (!last || last.type === "NEWLINE") return;
-    tokens5.push({ type: "NEWLINE", value: "", line: ln, col: c });
+    tokens7.push({ type: "NEWLINE", value: "", line: ln, col: c });
   };
   const isDigit = (ch) => ch >= "0" && ch <= "9";
   const isAlpha = (ch) => ch >= "a" && ch <= "z" || ch >= "A" && ch <= "Z" || ch === "_";
@@ -205,7 +357,7 @@ function tokenize(source) {
         num += advance();
         while (i < n && isDigit(peek())) num += advance();
       }
-      tokens5.push({ type: "NUMBER", value: num, line: startLine, col: startCol });
+      tokens7.push({ type: "NUMBER", value: num, line: startLine, col: startCol });
       continue;
     }
     if (ch === '"') {
@@ -249,111 +401,111 @@ function tokenize(source) {
         str += advance();
       }
       if (!closed) throw Makosa.maandishiHayajafungwa(startLine);
-      tokens5.push({ type: "STRING", value: str, line: startLine, col: startCol });
+      tokens7.push({ type: "STRING", value: str, line: startLine, col: startCol });
       continue;
     }
     if (isAlpha(ch)) {
       let word = "";
       while (i < n && isAlphaNum(peek())) word += advance();
       const type = isKeyword(word) ? KEYWORDS[word] : "IDENT";
-      tokens5.push({ type, value: word, line: startLine, col: startCol });
+      tokens7.push({ type, value: word, line: startLine, col: startCol });
       continue;
     }
     if (ch === "=" && peek(1) === "=") {
       advance();
       advance();
-      tokens5.push(mk("EQ", "==", startLine, startCol));
+      tokens7.push(mk("EQ", "==", startLine, startCol));
       continue;
     }
     if (ch === "!" && peek(1) === "=") {
       advance();
       advance();
-      tokens5.push(mk("NEQ", "!=", startLine, startCol));
+      tokens7.push(mk("NEQ", "!=", startLine, startCol));
       continue;
     }
     if (ch === "<" && peek(1) === "=") {
       advance();
       advance();
-      tokens5.push(mk("LTE", "<=", startLine, startCol));
+      tokens7.push(mk("LTE", "<=", startLine, startCol));
       continue;
     }
     if (ch === ">" && peek(1) === "=") {
       advance();
       advance();
-      tokens5.push(mk("GTE", ">=", startLine, startCol));
+      tokens7.push(mk("GTE", ">=", startLine, startCol));
       continue;
     }
     advance();
     switch (ch) {
       case "+":
-        tokens5.push(mk("PLUS", "+", startLine, startCol));
+        tokens7.push(mk("PLUS", "+", startLine, startCol));
         break;
       case "-":
-        tokens5.push(mk("MINUS", "-", startLine, startCol));
+        tokens7.push(mk("MINUS", "-", startLine, startCol));
         break;
       case "*":
-        tokens5.push(mk("STAR", "*", startLine, startCol));
+        tokens7.push(mk("STAR", "*", startLine, startCol));
         break;
       case "/":
-        tokens5.push(mk("SLASH", "/", startLine, startCol));
+        tokens7.push(mk("SLASH", "/", startLine, startCol));
         break;
       case "%":
-        tokens5.push(mk("PERCENT", "%", startLine, startCol));
+        tokens7.push(mk("PERCENT", "%", startLine, startCol));
         break;
       case "=":
-        tokens5.push(mk("ASSIGN", "=", startLine, startCol));
+        tokens7.push(mk("ASSIGN", "=", startLine, startCol));
         break;
       case "<":
-        tokens5.push(mk("LT", "<", startLine, startCol));
+        tokens7.push(mk("LT", "<", startLine, startCol));
         break;
       case ">":
-        tokens5.push(mk("GT", ">", startLine, startCol));
+        tokens7.push(mk("GT", ">", startLine, startCol));
         break;
       case "(":
-        tokens5.push(mk("LPAREN", "(", startLine, startCol));
+        tokens7.push(mk("LPAREN", "(", startLine, startCol));
         break;
       case ")":
-        tokens5.push(mk("RPAREN", ")", startLine, startCol));
+        tokens7.push(mk("RPAREN", ")", startLine, startCol));
         break;
       case "[":
-        tokens5.push(mk("LBRACKET", "[", startLine, startCol));
+        tokens7.push(mk("LBRACKET", "[", startLine, startCol));
         break;
       case "]":
-        tokens5.push(mk("RBRACKET", "]", startLine, startCol));
+        tokens7.push(mk("RBRACKET", "]", startLine, startCol));
         break;
       case "{":
-        tokens5.push(mk("LBRACE", "{", startLine, startCol));
+        tokens7.push(mk("LBRACE", "{", startLine, startCol));
         break;
       case "}":
-        tokens5.push(mk("RBRACE", "}", startLine, startCol));
+        tokens7.push(mk("RBRACE", "}", startLine, startCol));
         break;
       case ",":
-        tokens5.push(mk("COMMA", ",", startLine, startCol));
+        tokens7.push(mk("COMMA", ",", startLine, startCol));
         break;
       case ":":
-        tokens5.push(mk("COLON", ":", startLine, startCol));
+        tokens7.push(mk("COLON", ":", startLine, startCol));
         break;
       case ".":
-        tokens5.push(mk("DOT", ".", startLine, startCol));
+        tokens7.push(mk("DOT", ".", startLine, startCol));
         break;
       default:
         throw Makosa.herufiTatanishi(ch, startLine);
     }
   }
-  while (tokens5.length && tokens5[tokens5.length - 1].type === "NEWLINE") tokens5.pop();
-  tokens5.push({ type: "EOF", value: "", line, col });
-  return tokens5;
+  while (tokens7.length && tokens7[tokens7.length - 1].type === "NEWLINE") tokens7.pop();
+  tokens7.push({ type: "EOF", value: "", line, col });
+  return tokens7;
 }
 var mk = (type, value, line, col) => ({ type, value, line, col });
-function parse(tokens5) {
+function parse(tokens7) {
   let pos = 0;
-  const peek = () => tokens5[pos];
+  const peek = () => tokens7[pos];
   const at = (type) => peek().type === type;
   const isEnd = () => at(
     "EOF"
     /* EOF */
   );
-  const next = () => tokens5[pos++];
+  const next = () => tokens7[pos++];
   const describe = (t) => t.type === "EOF" ? "mwisho wa programu" : t.value || t.type;
   const expect = (type, nini) => {
     if (!at(type)) throw Makosa.ilitarajiwa(nini, describe(peek()), peek().line);
@@ -1725,11 +1877,11 @@ var snilExpert = {
     if (!text.trim()) return 0;
     if (afterMarker(text) !== null) return 0.97;
     if (looksLikeSnil(text)) return 0.95;
-    let score5 = 0;
-    if (RX_CODE_REQUEST.test(text)) score5 = Math.max(score5, 0.85);
-    if (RX_MATH_PHRASE.test(text)) score5 = Math.max(score5, 0.8);
-    if (RX_ARITH.test(text)) score5 = Math.max(score5, 0.7);
-    return score5;
+    let score6 = 0;
+    if (RX_CODE_REQUEST.test(text)) score6 = Math.max(score6, 0.85);
+    if (RX_MATH_PHRASE.test(text)) score6 = Math.max(score6, 0.8);
+    if (RX_ARITH.test(text)) score6 = Math.max(score6, 0.7);
+    return score6;
   },
   answer(q) {
     const text = q.text ?? "";
@@ -6478,11 +6630,11 @@ var ENGLISH_MARKERS = [
   "liver"
 ];
 function detectLanguage(normalized) {
-  const tokens5 = normalized.split(/\s+/).filter(Boolean);
-  if (tokens5.length === 0) return "en";
+  const tokens7 = normalized.split(/\s+/).filter(Boolean);
+  if (tokens7.length === 0) return "en";
   let swScore = 0;
   let enScore = 0;
-  for (const tok of tokens5) {
+  for (const tok of tokens7) {
     if (SWAHILI_MARKERS.includes(tok)) swScore += 2;
     if (ENGLISH_MARKERS.includes(tok)) enScore += 2;
     if (/^(ki|vi|m|wa|u|n|ma)[a-z]{3,}$/.test(tok)) swScore += 0.3;
@@ -6879,8 +7031,8 @@ function extractKnownEntities(normalized) {
     }
   }
   if (found.length === 0) {
-    const tokens5 = normalized.split(/\s+/).filter((t) => t.length >= 5);
-    for (const tok of tokens5) {
+    const tokens7 = normalized.split(/\s+/).filter((t) => t.length >= 5);
+    for (const tok of tokens7) {
       let bestMatch = null;
       for (const entry of REVERSE_INDEX) {
         if (Math.abs(entry.surfaceForm.length - tok.length) > 3) continue;
@@ -28356,17 +28508,17 @@ function translateToSwahili(text, bridge) {
   const phr = PHRASES[bridge] || {};
   const phraseKeys = Object.keys(phr).sort((a, b) => b.split(" ").length - a.split(" ").length);
   const prepped = bridge === "fr" ? text.replace(/\b(l|d|qu|n|s|c|t)['']/gi, "") : text;
-  const tokens5 = prepped.split(/\s+/).filter(Boolean);
+  const tokens7 = prepped.split(/\s+/).filter(Boolean);
   const out = [];
   const pairs = [];
   const unknown = [];
   let content = 0, resolved = 0;
   let i = 0;
-  while (i < tokens5.length) {
+  while (i < tokens7.length) {
     let matched = false;
     for (const pk of phraseKeys) {
       const len = pk.split(" ").length;
-      if (i + len <= tokens5.length && tokens5.slice(i, i + len).map(norm3).join(" ") === pk) {
+      if (i + len <= tokens7.length && tokens7.slice(i, i + len).map(norm3).join(" ") === pk) {
         out.push(phr[pk]);
         pairs.push({ src: pk, sw: phr[pk] });
         content += len;
@@ -28377,21 +28529,21 @@ function translateToSwahili(text, bridge) {
       }
     }
     if (matched) continue;
-    if (bridge === "en" && norm3(tokens5[i]) in ENG_SUBJ && i + 1 < tokens5.length) {
-      const person = ENG_SUBJ[norm3(tokens5[i])];
+    if (bridge === "en" && norm3(tokens7[i]) in ENG_SUBJ && i + 1 < tokens7.length) {
+      const person = ENG_SUBJ[norm3(tokens7[i])];
       let j = i + 1;
       let tense = "present";
-      if (MODAL_FUT.has(norm3(tokens5[j]))) {
+      if (MODAL_FUT.has(norm3(tokens7[j]))) {
         tense = "future";
         j++;
       }
-      const vk = j < tokens5.length ? norm3(tokens5[j]) : "";
+      const vk = j < tokens7.length ? norm3(tokens7[j]) : "";
       const vsw = vk ? vk in lex ? lex[vk] : resolveInflected(vk, lex) ?? "" : "";
       if (vsw && vsw.startsWith("ku") && !vsw.includes(" ")) {
         if (tense !== "future" && (PAST_FORMS.has(vk) || vk.endsWith("ed"))) tense = "past";
         const form = conjugate(vsw.slice(2), { person, tense });
         out.push(form);
-        if (!pairs.some((p) => p.src === `${norm3(tokens5[i])} ${vk}`)) pairs.push({ src: `${norm3(tokens5[i])} ${vk}`, sw: form });
+        if (!pairs.some((p) => p.src === `${norm3(tokens7[i])} ${vk}`)) pairs.push({ src: `${norm3(tokens7[i])} ${vk}`, sw: form });
         const span = j - i + 1;
         content += span;
         resolved += span;
@@ -28399,15 +28551,15 @@ function translateToSwahili(text, bridge) {
         continue;
       }
     }
-    if (bridge === "en" && norm3(tokens5[i]) in ADJ && i + 1 < tokens5.length) {
-      const nk = norm3(tokens5[i + 1]);
+    if (bridge === "en" && norm3(tokens7[i]) in ADJ && i + 1 < tokens7.length) {
+      const nk = norm3(tokens7[i + 1]);
       let nounSw = nk in lex ? lex[nk] : resolveInflected(nk, lex) || "";
       if (nounSw && nounSw.startsWith("ku")) nounSw = "";
       if (nounSw) {
-        const adj = ADJ[norm3(tokens5[i])];
+        const adj = ADJ[norm3(tokens7[i])];
         const adjSw = adj.vary ? adjConcord(adj.stem, classOf(nounSw)) : adj.stem;
         out.push(nounSw, adjSw);
-        if (!pairs.some((p) => p.src === `${norm3(tokens5[i])} ${nk}`)) pairs.push({ src: `${norm3(tokens5[i])} ${nk}`, sw: `${nounSw} ${adjSw}` });
+        if (!pairs.some((p) => p.src === `${norm3(tokens7[i])} ${nk}`)) pairs.push({ src: `${norm3(tokens7[i])} ${nk}`, sw: `${nounSw} ${adjSw}` });
         content += 2;
         resolved += 2;
         i += 2;
@@ -28415,8 +28567,8 @@ function translateToSwahili(text, bridge) {
       }
     }
     if (bridge === "en") {
-      const pkey = norm3(tokens5[i]);
-      const nkey = i + 1 < tokens5.length ? norm3(tokens5[i + 1]) : "";
+      const pkey = norm3(tokens7[i]);
+      const nkey = i + 1 < tokens7.length ? norm3(tokens7[i + 1]) : "";
       if (ENG_POSS.has(pkey) && nkey) {
         i += 2;
         content += 2;
@@ -28437,7 +28589,7 @@ function translateToSwahili(text, bridge) {
         continue;
       }
     }
-    const tok = tokens5[i];
+    const tok = tokens7[i];
     i++;
     const key = norm3(tok);
     if (!key) continue;
@@ -28469,9 +28621,9 @@ function translateToSwahili(text, bridge) {
 }
 
 // src/akili/experts/fasihi/engine/companion/router.ts
-var STRIP = /[^\p{L}\p{N}']+/gu;
+var STRIP2 = /[^\p{L}\p{N}']+/gu;
 function normalise(s) {
-  return (s ?? "").toLowerCase().replace(STRIP, " ").replace(/\s+/g, " ").trim();
+  return (s ?? "").toLowerCase().replace(STRIP2, " ").replace(/\s+/g, " ").trim();
 }
 function tokenize2(s) {
   return normalise(s).split(" ").filter((t) => t.length > 0 && t !== "'");
@@ -28625,14 +28777,14 @@ function scoreEntry(queryTokens, entry) {
   for (const tag of entry.tags ?? []) for (const t of tokenize2(tag)) tagTokens.add(t);
   const aTokens = /* @__PURE__ */ new Set();
   for (const t of tokenize2(`${entry.a?.sw ?? ""} ${entry.a?.en ?? ""}`)) aTokens.add(t);
-  let score5 = 0;
+  let score6 = 0;
   for (const qt of queryTokens) {
     if (STOP.has(qt)) continue;
-    if (qTokens.has(qt)) score5 += qWeight;
-    if (tagTokens.has(qt)) score5 += tagWeight;
-    if (aTokens.has(qt)) score5 += aWeight;
+    if (qTokens.has(qt)) score6 += qWeight;
+    if (tagTokens.has(qt)) score6 += tagWeight;
+    if (aTokens.has(qt)) score6 += aWeight;
   }
-  return score5;
+  return score6;
 }
 function retrieve(queryTokens) {
   let best = null;
@@ -28654,16 +28806,16 @@ var FALLBACK = {
   }
 };
 function ask(query) {
-  const norm9 = normalise(query);
-  if (!norm9) return FALLBACK;
-  if (includesAny(norm9, PRONOUNCE_HINTS)) {
-    return doPronounce(extractPayload(norm9, [...PRONOUNCE_HINTS, ...TRANSLATE_HINTS]));
+  const norm11 = normalise(query);
+  if (!norm11) return FALLBACK;
+  if (includesAny(norm11, PRONOUNCE_HINTS)) {
+    return doPronounce(extractPayload(norm11, [...PRONOUNCE_HINTS, ...TRANSLATE_HINTS]));
   }
-  if (includesAny(norm9, TRANSLATE_HINTS)) {
-    return doTranslate(extractPayload(norm9, TRANSLATE_HINTS));
+  if (includesAny(norm11, TRANSLATE_HINTS)) {
+    return doTranslate(extractPayload(norm11, TRANSLATE_HINTS));
   }
-  const tokens5 = tokenize2(norm9);
-  const hit = retrieve(tokens5);
+  const tokens7 = tokenize2(norm11);
+  const hit = retrieve(tokens7);
   if (hit && hit.score >= SCORE_THRESHOLD) {
     return {
       kind: "kb",
@@ -28675,9 +28827,9 @@ function ask(query) {
 }
 
 // src/akili/experts/fasihi/engine/ai/nlu.ts
-var STRIP2 = /[^\p{L}\p{N}']+/gu;
+var STRIP3 = /[^\p{L}\p{N}']+/gu;
 function normalise2(s) {
-  return (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP2, " ").replace(/\s+/g, " ").trim();
+  return (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP3, " ").replace(/\s+/g, " ").trim();
 }
 var includesAny2 = (hay, needles) => needles.some((n) => ` ${hay} `.includes(` ${n} `) || hay.startsWith(`${n} `) || hay.endsWith(` ${n}`));
 var PRONOUNCE = ["matamshi", "tamka", "tamko", "pronounce", "pronunciation", "how do you say", "how to say", "unasemaje", "natamkaje", "unatamkaje"];
@@ -28982,7 +29134,7 @@ var WORKS_META = [
 var WORKS_META_COUNT = WORKS_META.length;
 
 // src/akili/experts/fasihi/engine/ai/catalog.ts
-var STRIP3 = /[^\p{L}\p{N}']+/gu;
+var STRIP4 = /[^\p{L}\p{N}']+/gu;
 var STOP2 = /* @__PURE__ */ new Set([
   "a",
   "an",
@@ -29029,7 +29181,7 @@ var STOP2 = /* @__PURE__ */ new Set([
   "recommend"
 ]);
 function tokenize3(s) {
-  return (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP3, " ").split(/\s+/).filter((t) => t.length > 1 && !STOP2.has(t));
+  return (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP4, " ").split(/\s+/).filter((t) => t.length > 1 && !STOP2.has(t));
 }
 var READABLE = /* @__PURE__ */ new Set(["book", "story", "poetry"]);
 var corpus = () => WORKS_META.filter((w) => READABLE.has(w.type));
@@ -29127,8 +29279,8 @@ var includesAny3 = (h, ns) => ns.some((n) => ` ${h} `.includes(` ${n} `) || h.st
 var MWALIMU = ["nyambua", "conjugate", "conjugation", "mnyambuliko", "mnyambuo", "nyakati za", "tenses of"];
 var MSOMAJI = ["kuhusu", "about", "eleza kuhusu", "tell me about", "nini kuhusu", "themes", "dhamira", "maudhui", "simulia kuhusu"];
 var FASIHI = ["mwongozo", "uchambuzi", "chambua", "wahusika", "muhtasari", "maswali", "jaribio", "fasihi", "study guide", "characters", "summary", "summarise", "summarize", "analyse", "analyze", "analysis", "quiz"];
-function verbRoot(norm9) {
-  let s = norm9;
+function verbRoot(norm11) {
+  let s = norm11;
   for (const h of MWALIMU) s = s.split(h).join(" ");
   s = s.replace(/\b(verb|kitenzi|neno|the|in|present|wakati|uliopo|ya|kwa|of|kiswahili)\b/g, " ").replace(/\s+/g, " ").trim();
   let w = s.split(" ").filter(Boolean)[0] ?? "";
@@ -29350,8 +29502,8 @@ function askKasuku(query) {
 }
 
 // src/akili/experts/fasihi/index.ts
-var STRIP4 = /[^\p{L}\p{N}']+/gu;
-var norm4 = (s) => (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP4, " ").replace(/\s+/g, " ").trim();
+var STRIP5 = /[^\p{L}\p{N}']+/gu;
+var norm4 = (s) => (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP5, " ").replace(/\s+/g, " ").trim();
 function cueScore(text, cues, cap = 0.92) {
   const n = norm4(text);
   if (!n) return 0;
@@ -29535,9 +29687,9 @@ var lughaExpert = {
 };
 
 // src/akili/experts/sheria/index.ts
-var STRIP5 = /[^\p{L}\p{N}']+/gu;
-var norm5 = (s) => (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP5, " ").replace(/\s+/g, " ").trim();
-function hasCue(hay, cue) {
+var STRIP6 = /[^\p{L}\p{N}']+/gu;
+var norm5 = (s) => (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP6, " ").replace(/\s+/g, " ").trim();
+function hasCue2(hay, cue) {
   return ` ${hay} `.includes(` ${cue} `) || hay === cue;
 }
 function cueScore2(text, cues, cap = 0.92) {
@@ -29545,7 +29697,7 @@ function cueScore2(text, cues, cap = 0.92) {
   if (!n) return 0;
   const seen = /* @__PURE__ */ new Set();
   for (const c of cues) {
-    if (hasCue(n, c)) seen.add(c);
+    if (hasCue2(n, c)) seen.add(c);
     if (seen.size >= 3) break;
   }
   const hits = seen.size;
@@ -29595,6 +29747,33 @@ var SHERIA_CUES = [
   "ardhi",
   "kumiliki",
   "usajili",
+  // Kiswahili — added topics
+  "mtoto",
+  "watoto",
+  "malezi",
+  "matunzo",
+  "unyanyasaji",
+  "ukatili",
+  "jinsia",
+  "mwanamke",
+  "mke",
+  "kibali",
+  "hati",
+  "hatimiliki",
+  "pango",
+  "mpangaji",
+  "mwenye nyumba",
+  "rushwa",
+  "takukuru",
+  "kuandikisha",
+  "kura",
+  "uchaguzi",
+  "kupiga kura",
+  "mlemavu",
+  "ulemavu",
+  "gbv",
+  "kitambulisho",
+  "nida",
   // English
   "law",
   "legal",
@@ -29621,7 +29800,31 @@ var SHERIA_CUES = [
   "land",
   "legal aid",
   "sue",
-  "compensation"
+  "compensation",
+  // English — added topics
+  "child",
+  "children",
+  "custody",
+  "maintenance",
+  "abuse",
+  "violence",
+  "gender",
+  "woman",
+  "women",
+  "title deed",
+  "lease",
+  "landlord",
+  "rent",
+  "corruption",
+  "bribe",
+  "pcccb",
+  "vote",
+  "voting",
+  "election",
+  "register",
+  "disability",
+  "id card",
+  "birth certificate"
 ];
 var KB = [
   {
@@ -29703,6 +29906,135 @@ var KB = [
       { label: "Sheria ya Msaada wa Kisheria (Legal Aid Act 2017)" },
       { label: "LHRC / WLAC" }
     ]
+  },
+  {
+    id: "haki-za-mtoto",
+    cues: [
+      "mtoto",
+      "watoto",
+      "malezi",
+      "matunzo",
+      "child",
+      "children",
+      "custody",
+      "maintenance",
+      "cheti cha kuzaliwa",
+      "birth certificate",
+      "umri",
+      "ndoa ya mtoto"
+    ],
+    sw: "Haki za mtoto (Sheria ya Mtoto):\n\u2022 Kila mtoto ana haki ya jina, uraia na CHETI CHA KUZALIWA (kisajiliwe RITA).\n\u2022 Haki ya kupata malezi, chakula, afya na elimu; wazazi wote wawili wana wajibu wa matunzo.\n\u2022 Kulindwa dhidi ya ukatili, kazi hatarishi, na ndoa za utotoni.\n\u2022 Maslahi bora ya mtoto (best interests) ndiyo kipimo cha kwanza katika maamuzi yote.\n\u2022 Mzazi anayekataa kutoa matunzo anaweza kushtakiwa; ustawi wa jamii (social welfare) husaidia.\nMigogoro ya malezi/matunzo hupelekwa mahakamani; ona afisa ustawi wa jamii au wakili.",
+    en: "Rights of the child (Law of the Child Act):\n\u2022 Every child has a right to a name, nationality and a BIRTH CERTIFICATE (registered with RITA).\n\u2022 A right to care, food, health and education; both parents share the duty of maintenance.\n\u2022 Protection from violence, hazardous labour, and child marriage.\n\u2022 The child's best interests are the first consideration in every decision.\n\u2022 A parent who refuses maintenance can be taken to court; social welfare officers assist.\nCustody/maintenance disputes go to court; see a social welfare officer or a lawyer.",
+    sources: [
+      { label: "Sheria ya Mtoto (Law of the Child Act 2009)" },
+      { label: "RITA \u2014 Wakala wa Usajili, Ufilisi na Udhamini" }
+    ]
+  },
+  {
+    id: "ukatili-jinsia",
+    cues: [
+      "unyanyasaji",
+      "ukatili",
+      "jinsia",
+      "gbv",
+      "ubakaji",
+      "kupigwa",
+      "mwanamke",
+      "mke",
+      "violence",
+      "abuse",
+      "gender",
+      "rape",
+      "assault",
+      "domestic"
+    ],
+    sw: "Ukatili wa kijinsia na unyanyasaji (GBV):\n\u2022 Ukatili wa kijinsia, ubakaji, na unyanyasaji majumbani ni MAKOSA YA JINAI.\n\u2022 Ripoti kwa polisi \u2014 Dawati la Jinsia na Watoto (Gender & Children's Desk) lipo vituoni vingi.\n\u2022 Tafuta huduma za afya haraka; muombe daktari kujaza FOMU YA PF3 kama ushahidi.\n\u2022 Hifadhi ushahidi (ujumbe, picha, mashahidi); usinawe/usibadilishe nguo kabla ya uchunguzi pale inapowezekana.\n\u2022 Madawati ya msaada (mfano simu za bure za kusaidia) na mashirika kama WLAC/TAWLA hutoa msaada wa siri.\nUsalama wako ni kipaumbele; ona polisi, kituo cha afya, au mtoa-msaada wa kisheria.",
+    en: "Gender-based violence and abuse (GBV):\n\u2022 GBV, rape, and domestic violence are CRIMINAL OFFENCES.\n\u2022 Report to police \u2014 a Gender & Children's Desk exists at many stations.\n\u2022 Seek health care quickly; ask the doctor to complete a PF3 form as evidence.\n\u2022 Preserve evidence (messages, photos, witnesses); where possible do not wash/change clothes before examination.\n\u2022 Helplines and bodies like WLAC/TAWLA offer confidential support.\nYour safety comes first; see police, a health centre, or a legal-aid provider.",
+    sources: [
+      { label: "Sheria ya Makosa ya Kujamiiana (SOSPA)" },
+      { label: "Dawati la Jinsia na Watoto \u2014 Jeshi la Polisi" },
+      { label: "WLAC / TAWLA" }
+    ]
+  },
+  {
+    id: "ardhi",
+    cues: [
+      "ardhi",
+      "kumiliki",
+      "hati",
+      "hatimiliki",
+      "shamba",
+      "kiwanja",
+      "mpaka",
+      "land",
+      "title deed",
+      "plot",
+      "boundary",
+      "kijiji",
+      "village land",
+      "hati ya kimila"
+    ],
+    sw: "Ardhi na umiliki (misingi):\n\u2022 Ardhi yote Tanzania ni mali ya umma chini ya Rais kwa niaba ya wananchi; wewe hupewa HAKI YA MILKI (right of occupancy), si umiliki kamili.\n\u2022 Aina mbili: ardhi ya MJINI/HIFADHI (hati ya kawaida) na ardhi ya KIJIJI (hati ya kimila \u2014 CCRO).\n\u2022 Hakikisha una hati halali; thibitisha mipaka na umiliki kwenye ofisi ya ardhi/kijiji kabla ya kununua.\n\u2022 Sajili miamala ya ardhi; weka mikataba kwa maandishi na mashahidi.\n\u2022 Wanawake wana haki sawa ya kumiliki na kurithi ardhi.\nMigogoro ya ardhi hushughulikiwa na Mabaraza ya Ardhi (ngazi ya kijiji/kata) hadi Mahakama ya Ardhi.",
+    en: "Land and ownership (basics):\n\u2022 All land in Tanzania is public land vested in the President for the people; you hold a RIGHT OF OCCUPANCY, not absolute ownership.\n\u2022 Two kinds: GENERAL/urban land (a granted title) and VILLAGE land (a customary title \u2014 CCRO).\n\u2022 Confirm a valid title; verify boundaries and ownership at the land/village office before buying.\n\u2022 Register land transactions; put agreements in writing with witnesses.\n\u2022 Women have an equal right to own and inherit land.\nLand disputes go through Land Tribunals (village/ward level) up to the Land Court.",
+    sources: [
+      { label: "Sheria ya Ardhi (Land Act)" },
+      { label: "Sheria ya Ardhi ya Vijiji (Village Land Act)" }
+    ]
+  },
+  {
+    id: "pango-nyumba",
+    cues: [
+      "pango",
+      "mpangaji",
+      "mwenye nyumba",
+      "kupanga",
+      "kodi ya nyumba",
+      "lease",
+      "rent",
+      "tenant",
+      "landlord",
+      "mkataba wa pango"
+    ],
+    sw: "Kupanga nyumba (mpangaji na mwenye nyumba):\n\u2022 Wekeni MKATABA WA PANGO kwa maandishi: kodi, muda, dhamana (deposit), na nani analipa nini.\n\u2022 Mwenye nyumba hapaswi kumfukuza mpangaji kwa nguvu bila notisi/utaratibu wa kisheria.\n\u2022 Mpangaji ana wajibu wa kulipa kwa wakati na kutunza nyumba; mwenye nyumba ana wajibu wa matengenezo makubwa.\n\u2022 Toa/dai RISITI kwa kila malipo; hifadhi nakala ya mkataba.\n\u2022 Notisi ya kuhama itolewe kama ilivyokubaliwa kwenye mkataba.\nMgogoro wa pango unaweza kupelekwa kwa baraza la usuluhishi/mahakama husika.",
+    en: "Renting a home (tenant and landlord):\n\u2022 Put a LEASE in writing: rent, duration, deposit, and who pays for what.\n\u2022 A landlord may not forcibly evict a tenant without proper notice/legal process.\n\u2022 The tenant must pay on time and keep the home; the landlord handles major repairs.\n\u2022 Give/keep a RECEIPT for every payment; keep a copy of the lease.\n\u2022 Give notice to vacate as agreed in the lease.\nA rent dispute can go to the relevant tribunal/court.",
+    sources: [{ label: "Sheria ya Ardhi (Land Act) \u2014 sehemu za upangishaji" }]
+  },
+  {
+    id: "rushwa",
+    cues: ["rushwa", "takukuru", "hongo", "corruption", "bribe", "pcccb", "kuomba rushwa", "report corruption"],
+    sw: "Rushwa na jinsi ya kuripoti:\n\u2022 Kuomba, kutoa au kupokea RUSHWA ni kosa la jinai \u2014 kwa pande zote mbili.\n\u2022 Huna lazima kutoa rushwa kupata huduma ya umma ambayo ni haki yako.\n\u2022 Ripoti vitendo vya rushwa kwa TAKUKURU (Taasisi ya Kuzuia na Kupambana na Rushwa).\n\u2022 Toa maelezo sahihi: nani, lini, wapi, kiasi; hifadhi ushahidi wowote.\n\u2022 Watoa-taarifa (whistleblowers) wana ulinzi wa kisheria.\nKwa huduma za umma, dai risiti rasmi na uulize ada halali zilizoidhinishwa.",
+    en: "Corruption and how to report it:\n\u2022 Soliciting, giving or receiving a BRIBE is a criminal offence \u2014 on both sides.\n\u2022 You are not required to pay a bribe for a public service that is your right.\n\u2022 Report corruption to PCCB/PCCCB (the Prevention and Combating of Corruption Bureau \u2014 TAKUKURU).\n\u2022 Give specifics: who, when, where, how much; keep any evidence.\n\u2022 Whistleblowers have legal protection.\nFor public services, demand an official receipt and ask for the approved, lawful fee.",
+    sources: [
+      { label: "Sheria ya Kuzuia na Kupambana na Rushwa (PCCA 2007)" },
+      { label: "TAKUKURU \u2014 PCCB" }
+    ]
+  },
+  {
+    id: "haki-za-kiraia",
+    cues: [
+      "kura",
+      "kupiga kura",
+      "uchaguzi",
+      "vote",
+      "voting",
+      "election",
+      "kuandikisha",
+      "register",
+      "kitambulisho",
+      "nida",
+      "mlemavu",
+      "ulemavu",
+      "disability",
+      "id card",
+      "civic"
+    ],
+    sw: "Haki za kiraia (uraia, kura, vitambulisho):\n\u2022 Kupiga KURA ni haki ya kila raia mwenye sifa (umri wa miaka 18+); jiandikishe kwenye daftari la wapiga kura.\n\u2022 Kitambulisho cha taifa (NIDA) na cheti cha kuzaliwa ni nyaraka muhimu za utambuzi.\n\u2022 Uhuru wa kushiriki shughuli za kiraia, kuunda/kujiunga vyama, na kukosoa kwa amani.\n\u2022 Watu wenye ULEMAVU wana haki ya kupata huduma bila ubaguzi na kwa mazingira yanayofikika.\n\u2022 Huduma nyingi za serikali sasa zinapatikana mtandaoni \u2014 epuka madalali wanaodai rushwa.\nKwa masuala ya uchaguzi wasiliana na Tume Huru ya Taifa ya Uchaguzi (INEC).",
+    en: "Civic rights (citizenship, voting, IDs):\n\u2022 VOTING is a right of every qualified citizen (age 18+); register on the voters' roll.\n\u2022 The national ID (NIDA) and birth certificate are key identity documents.\n\u2022 Freedom to take part in civic life, form/join associations, and criticise peacefully.\n\u2022 People with DISABILITIES have a right to services without discrimination and to accessibility.\n\u2022 Many government services are now online \u2014 avoid touts demanding bribes.\nFor election matters contact the Independent National Electoral Commission (INEC).",
+    sources: [
+      { label: "Katiba ya Tanzania", ref: "Haki ya kushiriki shughuli za umma" },
+      { label: "INEC \u2014 Tume Huru ya Taifa ya Uchaguzi" },
+      { label: "NIDA \u2014 Mamlaka ya Vitambulisho vya Taifa" }
+    ]
   }
 ];
 var DISCLAIMER_SW2 = "Kumbuka: haya ni maelezo ya jumla kwa elimu tu \u2014 SI ushauri wa kisheria. Kwa hali yako halisi, tafadhali ona wakili au mtoa-msaada wa kisheria.";
@@ -29713,7 +30045,7 @@ function tokens(s) {
 function score(entry, qTokens, qNorm) {
   let s = 0;
   for (const c of entry.cues) {
-    if (hasCue(qNorm, c)) s += 2;
+    if (hasCue2(qNorm, c)) s += 2;
     else if (qTokens.includes(c)) s += 1;
   }
   return s;
@@ -29760,9 +30092,9 @@ ${DISCLAIMER_EN2}` : void 0;
 };
 
 // src/akili/experts/kilimo/index.ts
-var STRIP6 = /[^\p{L}\p{N}']+/gu;
-var norm6 = (s) => (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP6, " ").replace(/\s+/g, " ").trim();
-function hasCue2(hay, cue) {
+var STRIP7 = /[^\p{L}\p{N}']+/gu;
+var norm6 = (s) => (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP7, " ").replace(/\s+/g, " ").trim();
+function hasCue3(hay, cue) {
   return ` ${hay} `.includes(` ${cue} `) || hay === cue;
 }
 function cueScore3(text, cues, cap = 0.92) {
@@ -29770,7 +30102,7 @@ function cueScore3(text, cues, cap = 0.92) {
   if (!n) return 0;
   const seen = /* @__PURE__ */ new Set();
   for (const c of cues) {
-    if (hasCue2(n, c)) seen.add(c);
+    if (hasCue3(n, c)) seen.add(c);
     if (seen.size >= 3) break;
   }
   const hits = seen.size;
@@ -29822,6 +30154,28 @@ var KILIMO_CUES = [
   "ng ombe",
   "kuku",
   "mbuzi",
+  // Kiswahili — added
+  "bustani",
+  "nyanya",
+  "kitunguu",
+  "kabichi",
+  "bilinganya",
+  "pilipili",
+  "tikiti",
+  "ufugaji",
+  "maziwa",
+  "nyama",
+  "mayai",
+  "samaki",
+  "ufugaji wa samaki",
+  "nyuki",
+  "asali",
+  "ugani",
+  "pembejeo",
+  "ruzuku",
+  "mboji",
+  "kilimo hai",
+  "matandazo",
   // English
   "agriculture",
   "farm",
@@ -29852,7 +30206,29 @@ var KILIMO_CUES = [
   "cashew",
   "cotton",
   "livestock",
-  "irrigation"
+  "irrigation",
+  // English — added
+  "vegetables",
+  "tomato",
+  "onion",
+  "horticulture",
+  "poultry",
+  "chicken",
+  "goat",
+  "cattle",
+  "dairy",
+  "milk",
+  "fish",
+  "aquaculture",
+  "beekeeping",
+  "honey",
+  "compost",
+  "organic",
+  "mulch",
+  "extension",
+  "subsidy",
+  "sunflower",
+  "groundnuts"
 ];
 var KB2 = [
   {
@@ -29912,6 +30288,123 @@ var KB2 = [
       { label: "Wizara ya Kilimo" },
       { label: "Bodi ya Usimamizi wa Stakabadhi za Ghala (WRRB)" }
     ]
+  },
+  {
+    id: "mboga-bustani",
+    cues: [
+      "mboga",
+      "bustani",
+      "nyanya",
+      "kitunguu",
+      "kabichi",
+      "pilipili",
+      "bilinganya",
+      "vegetables",
+      "tomato",
+      "onion",
+      "horticulture",
+      "kitalu",
+      "umwagiliaji wa matone"
+    ],
+    sw: "Mboga za majani na bustani (kilimo cha bustani):\n\u2022 Mboga huleta kipato cha haraka \u2014 hukomaa ndani ya wiki chache hadi miezi michache.\n\u2022 Andaa KITALU chenye udongo laini wenye mboji; hamishia miche (nyanya, kabichi, vitunguu) shambani ikifikia urefu sahihi.\n\u2022 Mwagilia mara kwa mara; umwagiliaji wa MATONE (drip) huokoa maji na hupunguza magonjwa.\n\u2022 Zungusha mboga na epuka kupanda jamii moja mahali pamoja kila msimu (kuzuia wadudu/magonjwa).\n\u2022 Vuna asubuhi/jioni na peleka sokoni haraka \u2014 mboga huharibika upesi.\nMboga zinafaa hata kwenye eneo dogo karibu na nyumbani kwa lishe na biashara.",
+    en: "Vegetables and gardening (horticulture):\n\u2022 Vegetables bring quick income \u2014 they mature in a few weeks to a few months.\n\u2022 Prepare a NURSERY with fine, compost-rich soil; transplant seedlings (tomato, cabbage, onion) at the right height.\n\u2022 Water regularly; DRIP irrigation saves water and reduces disease.\n\u2022 Rotate vegetables and avoid planting the same family in one place each season (to curb pests/disease).\n\u2022 Harvest morning/evening and get to market fast \u2014 vegetables spoil quickly.\nVegetables suit even a small plot near the home, for nutrition and income.",
+    sources: [
+      { label: "Wizara ya Kilimo", ref: "Kilimo cha bustani (horticulture)" },
+      { label: "TAHA \u2014 Chama cha Wadau wa Kilimo cha Bustani" }
+    ]
+  },
+  {
+    id: "mifugo-kuku",
+    cues: [
+      "mifugo",
+      "kuku",
+      "ng ombe",
+      "mbuzi",
+      "ufugaji",
+      "maziwa",
+      "nyama",
+      "mayai",
+      "poultry",
+      "chicken",
+      "cattle",
+      "goat",
+      "dairy",
+      "milk",
+      "chanjo",
+      "banda"
+    ],
+    sw: "Ufugaji bora (kuku, mbuzi, ng'ombe):\n\u2022 KUKU: anza na idadi ndogo; toa BANDA safi, kavu na lenye hewa; chanja dhidi ya mdondo (Newcastle) na kideri.\n\u2022 Toa chakula bora na maji safi kila siku; tenga wagonjwa ili kuzuia maambukizi.\n\u2022 MBUZI/NG'OMBE: hakikisha malisho/maji ya kutosha, ogesha dhidi ya kupe, na kinga minyoo.\n\u2022 NG'OMBE WA MAZIWA: usafi wa kukamua na kuhifadhi maziwa ni muhimu kwa bei na afya.\n\u2022 Weka kumbukumbu za chanjo, uzazi na gharama; wasiliana na afisa MIFUGO/mhudumu wa mifugo.\nChanjo na usafi wa banda ni nafuu kuliko kutibu mlipuko wa ugonjwa.",
+    en: "Better livestock keeping (poultry, goats, cattle):\n\u2022 POULTRY: start small; provide a clean, dry, airy house; vaccinate against Newcastle and fowl pox.\n\u2022 Give good feed and clean water daily; isolate sick birds to stop spread.\n\u2022 GOATS/CATTLE: ensure enough pasture/water, dip against ticks, and deworm.\n\u2022 DAIRY CATTLE: clean milking and storage matter for price and health.\n\u2022 Keep records of vaccinations, births and costs; consult a LIVESTOCK officer/para-vet.\nVaccination and a clean house are cheaper than treating a disease outbreak.",
+    sources: [
+      { label: "Wizara ya Mifugo na Uvuvi" },
+      { label: "Bodi ya Maziwa Tanzania (TDB)" }
+    ]
+  },
+  {
+    id: "ufugaji-samaki-nyuki",
+    cues: [
+      "samaki",
+      "ufugaji wa samaki",
+      "bwawa",
+      "nyuki",
+      "asali",
+      "mizinga",
+      "fish",
+      "aquaculture",
+      "beekeeping",
+      "honey",
+      "fish pond"
+    ],
+    sw: "Ufugaji wa samaki na nyuki (kipato cha ziada):\n\u2022 SAMAKI: chimba BWAWA mahali penye maji ya kutosha; perege (tilapia) na kambare hufaa kwa wengi.\n\u2022 Weka vifaranga vyenye afya, lisha kwa kiasi, na badilisha/safisha maji kuepuka magonjwa.\n\u2022 NYUKI: weka MIZINGA mahali tulivu, penye maua na maji karibu; vaa kinga wakati wa kurina.\n\u2022 Asali, nta na uchavushaji wa mazao ni faida za ufugaji nyuki; soko la asali halisi ni kubwa.\n\u2022 Anza kidogo, jifunze, kisha ongeza mabwawa/mizinga kadiri unavyopata uzoefu.\nWasiliana na afisa UVUVI/maliasili kwa mbinu na vibali pale vinapohitajika.",
+    en: "Fish and bee keeping (extra income):\n\u2022 FISH: dig a POND where water is sufficient; tilapia and catfish suit many farmers.\n\u2022 Stock healthy fingerlings, feed moderately, and refresh/clean water to avoid disease.\n\u2022 BEES: place HIVES in a calm spot with flowers and water nearby; wear protection when harvesting.\n\u2022 Honey, wax and crop pollination are the gains of beekeeping; demand for real honey is high.\n\u2022 Start small, learn, then add ponds/hives as you gain experience.\nConsult a FISHERIES/natural-resources officer for methods and any required permits.",
+    sources: [
+      { label: "Wizara ya Mifugo na Uvuvi", ref: "Ufugaji wa samaki (aquaculture)" },
+      { label: "Wakala wa Huduma za Misitu Tanzania (TFS)", ref: "Ufugaji nyuki" }
+    ]
+  },
+  {
+    id: "udongo-mboji",
+    cues: [
+      "udongo",
+      "mboji",
+      "kilimo hai",
+      "matandazo",
+      "rutuba",
+      "soil",
+      "compost",
+      "organic",
+      "mulch",
+      "kupima udongo",
+      "soil health"
+    ],
+    sw: "Afya ya udongo na mboji (rutuba endelevu):\n\u2022 Udongo wenye afya ndio msingi wa mavuno \u2014 utunze kama mtaji.\n\u2022 Tengeneza MBOJI kutoka mabaki ya mazao, samadi na majani; hurutubisha udongo bila gharama kubwa.\n\u2022 Weka MATANDAZO (mulch) kuzuia upotevu wa maji, kupunguza magugu na kulinda udongo.\n\u2022 Zungusha mazao na panda jamii ya mikunde (maharage, kunde) ili kuongeza naitrojeni.\n\u2022 Epuka kuchoma mabaki ya shamba na kulima kupita kiasi \u2014 huharibu rutuba na kusababisha mmomonyoko.\nPima udongo pale inapowezekana ili kujua aina sahihi ya mbolea/marekebisho.",
+    en: "Soil health and compost (lasting fertility):\n\u2022 Healthy soil is the basis of yield \u2014 treat it as capital.\n\u2022 Make COMPOST from crop residues, manure and leaves; it enriches soil cheaply.\n\u2022 Use MULCH to cut water loss, suppress weeds and protect the soil.\n\u2022 Rotate crops and plant legumes (beans, cowpeas) to add nitrogen.\n\u2022 Avoid burning residues and over-tilling \u2014 they destroy fertility and cause erosion.\nTest your soil where possible to know the right fertiliser/amendment.",
+    sources: [
+      { label: "Wizara ya Kilimo", ref: "Afya ya udongo na rutuba" },
+      { label: "TARI \u2014 Taasisi ya Utafiti wa Kilimo Tanzania" }
+    ]
+  },
+  {
+    id: "ugani-pembejeo",
+    cues: [
+      "ugani",
+      "afisa ugani",
+      "pembejeo",
+      "ruzuku",
+      "extension",
+      "subsidy",
+      "msaada wa kilimo",
+      "vocha",
+      "inputs",
+      "mkopo wa kilimo",
+      "taarifa za kilimo"
+    ],
+    sw: "Huduma za ugani na pembejeo (wapi kupata msaada):\n\u2022 AFISA UGANI wa kata/kijiji hutoa ushauri wa bure: aina za mbegu, mbolea, na udhibiti wa wadudu kwa eneo lako.\n\u2022 Nunua PEMBEJEO (mbegu, mbolea, dawa) kutoka mawakala walioidhinishwa; epuka bidhaa bandia.\n\u2022 Serikali mara nyingine hutoa RUZUKU/vocha za pembejeo kwa wakulima \u2014 uliza ofisi ya kilimo ya wilaya.\n\u2022 Jiunge na VIKUNDI/ushirika (AMCOS) ili kupata pembejeo, mikopo na soko kwa pamoja kwa bei nafuu.\n\u2022 Fuata utafiti wa TARI na taarifa za masoko ili kufanya maamuzi sahihi.\nUshauri wa afisa ugani ni nafuu na hupunguza hasara za kubahatisha.",
+    en: "Extension services and inputs (where to get help):\n\u2022 A ward/village EXTENSION OFFICER gives free advice: seed varieties, fertiliser, and pest control for your area.\n\u2022 Buy INPUTS (seed, fertiliser, chemicals) from authorised agents; avoid fake products.\n\u2022 Government sometimes offers input SUBSIDIES/vouchers to farmers \u2014 ask the district agriculture office.\n\u2022 Join GROUPS/cooperatives (AMCOS) to access inputs, credit and markets together at better prices.\n\u2022 Follow TARI research and market information to make good decisions.\nExtension advice is cheap and reduces the losses of guesswork.",
+    sources: [
+      { label: "Wizara ya Kilimo", ref: "Huduma za ugani" },
+      { label: "TARI \u2014 Taasisi ya Utafiti wa Kilimo Tanzania" }
+    ]
   }
 ];
 function tokens2(s) {
@@ -29920,7 +30413,7 @@ function tokens2(s) {
 function score2(entry, qTokens, qNorm) {
   let s = 0;
   for (const c of entry.cues) {
-    if (hasCue2(qNorm, c)) s += 2;
+    if (hasCue3(qNorm, c)) s += 2;
     else if (qTokens.includes(c)) s += 1;
   }
   return s;
@@ -29961,9 +30454,9 @@ var kilimoExpert = {
 };
 
 // src/akili/experts/elimu/index.ts
-var STRIP7 = /[^\p{L}\p{N}']+/gu;
-var norm7 = (s) => (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP7, " ").replace(/\s+/g, " ").trim();
-function hasCue3(hay, cue) {
+var STRIP8 = /[^\p{L}\p{N}']+/gu;
+var norm7 = (s) => (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP8, " ").replace(/\s+/g, " ").trim();
+function hasCue4(hay, cue) {
   return ` ${hay} `.includes(` ${cue} `) || hay === cue;
 }
 function cueScore4(text, cues, cap = 0.92) {
@@ -29971,7 +30464,7 @@ function cueScore4(text, cues, cap = 0.92) {
   if (!n) return 0;
   const seen = /* @__PURE__ */ new Set();
   for (const c of cues) {
-    if (hasCue3(n, c)) seen.add(c);
+    if (hasCue4(n, c)) seen.add(c);
     if (seen.size >= 3) break;
   }
   const hits = seen.size;
@@ -30014,6 +30507,26 @@ var ELIMU_CUES = [
   "kiswahili somo",
   "algebra",
   "jiometri",
+  // Kiswahili — pathways & support
+  "chuo",
+  "chuo kikuu",
+  "udahili",
+  "kujiunga",
+  "heslb",
+  "mkopo wa elimu",
+  "ufaulu",
+  "kombo",
+  "ufundi",
+  "veta",
+  "nacte",
+  "tcu",
+  "tie",
+  "mtaala",
+  "insha",
+  "utungaji",
+  "msongo",
+  "mafadhaiko",
+  "kuandika",
   // English
   "education",
   "school",
@@ -30041,7 +30554,22 @@ var ELIMU_CUES = [
   "geography",
   "history",
   "revision",
-  "notes"
+  "notes",
+  // English — pathways & support
+  "university",
+  "college",
+  "admission",
+  "enrol",
+  "loan",
+  "scholarship",
+  "vocational",
+  "curriculum",
+  "essay",
+  "writing",
+  "english",
+  "exam stress",
+  "anxiety",
+  "career"
 ];
 var KB3 = [
   {
@@ -30093,6 +30621,111 @@ To COMPUTE an exact answer, the SNIL expert can calculate directly \u2014 ask it
     sw: "Wapi kujifunza zaidi (rasilimali za Laetoli):\n\u2022 JIFUNZE \u2014 kozi za Kiswahili na masomo kwa hatua (mwanzo \u2192 umahiri).\n\u2022 SNIL \u2014 Kiswahili \u2192 msimbo: nzuri kwa hesabu, mantiki na kujifunza programu.\n\u2022 KASUKU \u2014 fasihi, vitabu, na miongozo ya usomaji.\nUliza Akili swali lolote; itakuelekeza kwa mtaalamu sahihi (afya, lugha, kilimo, sheria, biashara...).",
     en: "Where to learn more (Laetoli resources):\n\u2022 JIFUNZE \u2014 step-by-step Swahili and subject courses (beginner \u2192 mastery).\n\u2022 SNIL \u2014 Swahili \u2192 code: great for maths, logic and learning to program.\n\u2022 KASUKU \u2014 literature, books and reading guides.\nAsk Akili anything; it routes you to the right expert (health, language, agriculture, law, business\u2026).",
     sources: [{ label: "Akili KB \u2014 Elimu", ref: "Laetoli (Jifunze / SNIL / Kasuku)" }]
+  },
+  {
+    id: "elimu-ya-juu",
+    cues: [
+      "chuo",
+      "chuo kikuu",
+      "udahili",
+      "kujiunga",
+      "tcu",
+      "nacte",
+      "university",
+      "college",
+      "admission",
+      "enrol",
+      "a level",
+      "diploma",
+      "shahada",
+      "degree",
+      "baada ya kidato"
+    ],
+    sw: "Elimu ya juu na udahili (baada ya sekondari):\n\u2022 Njia kuu: ASTASHAHADA/STASHAHADA (certificate/diploma) au SHAHADA (degree) vyuoni.\n\u2022 Vyuo vikuu husimamiwa na TCU; vyuo vya kati/ufundi husimamiwa na NACTE.\n\u2022 Udahili wa shahada hutegemea ufaulu wa A-Level (ACSEE) au sifa sawa; angalia masharti ya kozi.\n\u2022 Omba kupitia mfumo wa pamoja wa udahili (central admission) ndani ya muda; andaa vyeti halali.\n\u2022 Chagua kozi kwa kuangalia kipaji chako, soko la ajira, na gharama.\nHakiki kozi/chuo kimetambuliwa na TCU/NACTE kabla ya kujiunga.",
+    en: "Higher education and admission (after secondary):\n\u2022 Main routes: a CERTIFICATE/DIPLOMA or a DEGREE at colleges/universities.\n\u2022 Universities are regulated by TCU; technical colleges by NACTE.\n\u2022 Degree admission depends on A-Level (ACSEE) results or equivalent; check course requirements.\n\u2022 Apply through the central admission system within the deadline; prepare valid certificates.\n\u2022 Choose a course by your talent, the job market, and cost.\nConfirm a course/college is recognised by TCU/NACTE before enrolling.",
+    sources: [
+      { label: "TCU \u2014 Tume ya Vyuo Vikuu Tanzania" },
+      { label: "NACTE \u2014 Baraza la Taifa la Elimu ya Ufundi" }
+    ]
+  },
+  {
+    id: "mkopo-heslb",
+    cues: [
+      "heslb",
+      "mkopo wa elimu",
+      "mkopo",
+      "loan",
+      "scholarship",
+      "ufadhili",
+      "ada ya chuo",
+      "student loan",
+      "fees",
+      "gharama za chuo",
+      "bodi ya mikopo"
+    ],
+    sw: "Mkopo wa elimu ya juu (HESLB):\n\u2022 HESLB hutoa mikopo kwa wanafunzi wa elimu ya juu wenye uhitaji, hasa kwa kozi za kipaumbele.\n\u2022 Omba mtandaoni kupitia mfumo wa HESLB ndani ya muda; jaza taarifa za kweli na ambatanisha vielelezo.\n\u2022 Mkopo HUREJESHWA baada ya kumaliza na kuanza kazi \u2014 ni deni, si zawadi.\n\u2022 Zingatia vigezo vya uhitaji (yatima, kipato cha familia, ulemavu) vinavyoweza kukupa kipaumbele.\n\u2022 Tafuta pia ufadhili (scholarships) wa serikali, mashirika na sekta binafsi.\nThibitisha tarehe za mwisho na masharti kwenye tovuti rasmi ya HESLB.",
+    en: "Higher-education loans (HESLB):\n\u2022 HESLB provides loans to needy higher-education students, especially for priority courses.\n\u2022 Apply online through the HESLB system within the deadline; give true information and attach evidence.\n\u2022 A loan is REPAID after you finish and start working \u2014 it is a debt, not a gift.\n\u2022 Note needs criteria (orphanhood, family income, disability) that may give priority.\n\u2022 Also look for scholarships from government, NGOs and the private sector.\nConfirm deadlines and terms on the official HESLB website.",
+    sources: [{ label: "HESLB \u2014 Bodi ya Mikopo ya Wanafunzi wa Elimu ya Juu" }]
+  },
+  {
+    id: "ufundi-veta",
+    cues: [
+      "veta",
+      "ufundi",
+      "vocational",
+      "ujuzi",
+      "fundi",
+      "useremala",
+      "ushonaji",
+      "umeme",
+      "mekanika",
+      "skills",
+      "trade",
+      "mafunzo ya ufundi"
+    ],
+    sw: "Mafunzo ya ufundi stadi (VETA):\n\u2022 VETA hutoa mafunzo ya ujuzi wa vitendo: useremala, umeme, mekanika, ushonaji, upishi, TEHAMA, n.k.\n\u2022 Ni njia nzuri kwa anayependa kazi za mikono au kujiajiri \u2014 soko la mafundi ni kubwa.\n\u2022 Mafunzo huwa ya muda mfupi hadi miaka kadhaa; baadhi hutoa vyeti vinavyotambulika kitaifa (NVA).\n\u2022 Sifa za kujiunga ni nafuu kuliko chuo kikuu; baadhi hupokea hata waliomaliza darasa la saba.\n\u2022 Ujuzi pamoja na elimu ya biashara hukuwezesha kuanzisha kazi yako mwenyewe.\nTafuta kituo cha VETA kilicho karibu na uangalie kozi zinazotolewa.",
+    en: "Vocational training (VETA):\n\u2022 VETA teaches practical skills: carpentry, electrical, mechanics, tailoring, cookery, ICT, etc.\n\u2022 A great route for hands-on work or self-employment \u2014 demand for skilled artisans is high.\n\u2022 Courses run from short to a few years; some give nationally recognised certificates (NVA).\n\u2022 Entry requirements are lighter than university; some take even Standard 7 leavers.\n\u2022 Skills plus business basics let you start your own trade.\nFind a nearby VETA centre and check the courses offered.",
+    sources: [{ label: "VETA \u2014 Mamlaka ya Elimu na Mafunzo ya Ufundi Stadi" }]
+  },
+  {
+    id: "kuandika-insha",
+    cues: [
+      "insha",
+      "utungaji",
+      "kuandika",
+      "essay",
+      "writing",
+      "composition",
+      "aya",
+      "paragraph",
+      "lugha",
+      "utungo",
+      "andika insha"
+    ],
+    sw: "Kuandika insha vizuri:\n\u2022 Panga kabla: UTANGULIZI (wazo kuu), KIINI (hoja kwa aya), na HITIMISHO (muhtasari/maoni).\n\u2022 Aya moja = wazo moja; anza na sentensi-mwongozo, kisha eleza na toa mfano.\n\u2022 Tumia lugha sahihi: alama za uakifishaji, sarufi, na maneno-unganishi (kwa hiyo, hata hivyo, mfano).\n\u2022 Jibu SWALI hasa lililoulizwa; soma maagizo mara mbili.\n\u2022 Soma tena ukimaliza ili kurekebisha makosa; andika kwa usafi.\nKwa Kiswahili fasaha na miongozo ya uandishi, tumia Jifunze na Kasuku.",
+    en: "Writing a good essay:\n\u2022 Plan first: INTRODUCTION (main idea), BODY (one argument per paragraph), CONCLUSION (summary/opinion).\n\u2022 One paragraph = one idea; start with a topic sentence, then explain and give an example.\n\u2022 Use correct language: punctuation, grammar, and linking words (therefore, however, for example).\n\u2022 Answer the exact QUESTION asked; read the instructions twice.\n\u2022 Re-read at the end to fix mistakes; write neatly.\nFor polished Swahili and writing guides, use Jifunze and Kasuku.",
+    sources: [
+      { label: "TIE \u2014 Taasisi ya Elimu Tanzania", ref: "Mtaala wa lugha" },
+      { label: "Akili KB \u2014 Elimu" }
+    ]
+  },
+  {
+    id: "msongo-mitihani",
+    cues: [
+      "msongo",
+      "mafadhaiko",
+      "exam stress",
+      "anxiety",
+      "hofu",
+      "wasiwasi",
+      "kuchoka",
+      "shinikizo",
+      "stress",
+      "kushindwa"
+    ],
+    sw: "Kukabili msongo wa mitihani:\n\u2022 Anza maandalizi mapema ili kuepuka kuvuruga (cramming) usiku wa mwisho.\n\u2022 Gawa masomo katika vipande vidogo; sherehekea hatua ndogo unazofikia.\n\u2022 Lala vya kutosha, kula vizuri, na fanya mazoezi mepesi \u2014 ubongo unahitaji mapumziko.\n\u2022 Tumia mbinu za kupumua na mapumziko mafupi (mfano dakika 25 soma, 5 pumzika).\n\u2022 Zungumza na mwalimu, mzazi au rafiki ukihisi shinikizo kupita kiasi; si dalili ya udhaifu.\nMtihani mmoja hauamui maisha yako yote \u2014 fanya bidii, lakini tunza afya yako ya akili.",
+    en: "Coping with exam stress:\n\u2022 Start preparing early to avoid last-night cramming.\n\u2022 Break study into small chunks; celebrate small milestones.\n\u2022 Sleep enough, eat well, and do light exercise \u2014 the brain needs rest.\n\u2022 Use breathing techniques and short breaks (e.g. study 25 min, rest 5).\n\u2022 Talk to a teacher, parent or friend if pressure feels overwhelming; it is not weakness.\nOne exam does not decide your whole life \u2014 work hard, but protect your mental health.",
+    sources: [{ label: "Akili KB \u2014 Elimu", ref: "Ustawi wa mwanafunzi" }]
   }
 ];
 function tokens3(s) {
@@ -30101,7 +30734,7 @@ function tokens3(s) {
 function score3(entry, qTokens, qNorm) {
   let s = 0;
   for (const c of entry.cues) {
-    if (hasCue3(qNorm, c)) s += 2;
+    if (hasCue4(qNorm, c)) s += 2;
     else if (qTokens.includes(c)) s += 1;
   }
   return s;
@@ -30142,9 +30775,9 @@ var elimuExpert = {
 };
 
 // src/akili/experts/biashara/index.ts
-var STRIP8 = /[^\p{L}\p{N}']+/gu;
-var norm8 = (s) => (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP8, " ").replace(/\s+/g, " ").trim();
-function hasCue4(hay, cue) {
+var STRIP9 = /[^\p{L}\p{N}']+/gu;
+var norm8 = (s) => (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP9, " ").replace(/\s+/g, " ").trim();
+function hasCue5(hay, cue) {
   return ` ${hay} `.includes(` ${cue} `) || hay === cue;
 }
 function cueScore5(text, cues, cap = 0.92) {
@@ -30152,7 +30785,7 @@ function cueScore5(text, cues, cap = 0.92) {
   if (!n) return 0;
   const seen = /* @__PURE__ */ new Set();
   for (const c of cues) {
-    if (hasCue4(n, c)) seen.add(c);
+    if (hasCue5(n, c)) seen.add(c);
     if (seen.size >= 3) break;
   }
   const hits = seen.size;
@@ -30198,6 +30831,27 @@ var BIASHARA_CUES = [
   "airtel money",
   "simu banking",
   "malipo",
+  // Kiswahili — added
+  "mpango wa biashara",
+  "bajeti",
+  "kumbukumbu",
+  "hesabu za biashara",
+  "utangazaji",
+  "masoko",
+  "matangazo",
+  "mtandaoni",
+  "bima",
+  "hatari",
+  "deni",
+  "madeni",
+  "hisa",
+  "ushirika",
+  "brela",
+  "tin",
+  "efd",
+  "risiti",
+  "kuuza",
+  "wadeni",
   // English
   "business",
   "entrepreneur",
@@ -30227,7 +30881,27 @@ var BIASHARA_CUES = [
   "mobile money",
   "payment",
   "budget",
-  "finance"
+  "finance",
+  // English — added
+  "business plan",
+  "bookkeeping",
+  "records",
+  "marketing",
+  "advertising",
+  "branding",
+  "online",
+  "social media",
+  "insurance",
+  "risk",
+  "debt",
+  "credit",
+  "shares",
+  "cooperative",
+  "receipt",
+  "selling",
+  "pricing",
+  "cashflow",
+  "cash flow"
 ];
 var KB4 = [
   {
@@ -30280,6 +30954,104 @@ var KB4 = [
       { label: "TCDC \u2014 Tume ya Maendeleo ya Ushirika" },
       { label: "Akili KB \u2014 Biashara" }
     ]
+  },
+  {
+    id: "mpango-wa-biashara",
+    cues: [
+      "mpango wa biashara",
+      "mpango",
+      "business plan",
+      "plan",
+      "wazo",
+      "idea",
+      "mkakati",
+      "lengo",
+      "utafiti wa soko",
+      "market research"
+    ],
+    sw: "Mpango wa biashara (rahisi lakini muhimu):\n\u2022 WAZO & TATIZO: unauza nini, na unatatua tatizo gani la wateja?\n\u2022 SOKO: wateja wako ni nani, wapo wapi, na washindani wako ni akina nani?\n\u2022 BEI & MAUZO: utauzaje, kwa bei gani, na unatarajia kuuza kiasi gani?\n\u2022 GHARAMA & MTAJI: utahitaji pesa kiasi gani kuanza na kuendesha kila mwezi?\n\u2022 FAIDA & MUDA: utaanza kupata faida lini, na mtaji utarejea baada ya muda gani?\nMpango wa kurasa 1\u20132 unatosha kuanzia; uboreshe unapojifunza zaidi kutoka sokoni.",
+    en: "Business plan (simple but essential):\n\u2022 IDEA & PROBLEM: what do you sell, and what customer problem does it solve?\n\u2022 MARKET: who are your customers, where are they, and who are your competitors?\n\u2022 PRICE & SALES: how will you sell, at what price, and how much do you expect to sell?\n\u2022 COSTS & CAPITAL: how much do you need to start and to run each month?\n\u2022 PROFIT & TIME: when will you start profiting, and how soon will capital return?\nA 1\u20132 page plan is enough to start; refine it as you learn from the market.",
+    sources: [{ label: "Akili KB \u2014 Biashara", ref: "Mpango wa biashara" }]
+  },
+  {
+    id: "kumbukumbu-bajeti",
+    cues: [
+      "kumbukumbu",
+      "hesabu za biashara",
+      "bookkeeping",
+      "records",
+      "bajeti",
+      "budget",
+      "daftari",
+      "ledger",
+      "cashflow",
+      "cash flow",
+      "mtiririko wa fedha"
+    ],
+    sw: "Kumbukumbu na bajeti (uhasibu rahisi):\n\u2022 Weka DAFTARI moja: andika kila MAUZO (kinachoingia) na kila MATUMIZI (kinachotoka) kwa tarehe.\n\u2022 Hifadhi risiti zote; linganisha pesa za mkononi na daftari kila siku/jioni.\n\u2022 BAJETI: panga mapema kiasi cha kutumia kwa manunuzi, pango, usafiri na akiba.\n\u2022 Fuatilia MTIRIRIKO WA FEDHA \u2014 biashara inaweza kuwa na faida lakini ikakosa pesa taslimu (cashflow).\n\u2022 Jilipe mshahara wako badala ya kuchukua pesa za biashara ovyo.\nProgramu rahisi za simu au daftari la kawaida zote zinafaa \u2014 muhimu ni uthabiti.",
+    en: "Records and budgeting (simple bookkeeping):\n\u2022 Keep ONE book: record every SALE (money in) and every EXPENSE (money out) with the date.\n\u2022 Keep all receipts; reconcile cash on hand against the book each day/evening.\n\u2022 BUDGET: plan in advance what to spend on stock, rent, transport and savings.\n\u2022 Track CASH FLOW \u2014 a business can be profitable yet run out of cash.\n\u2022 Pay yourself a wage rather than randomly taking business money.\nA simple phone app or an ordinary notebook both work \u2014 consistency is what matters.",
+    sources: [{ label: "Akili KB \u2014 Biashara", ref: "Uhasibu na bajeti" }]
+  },
+  {
+    id: "masoko-wateja",
+    cues: [
+      "masoko",
+      "utangazaji",
+      "matangazo",
+      "marketing",
+      "advertising",
+      "branding",
+      "mtandaoni",
+      "online",
+      "social media",
+      "mitandao ya kijamii",
+      "wateja",
+      "customers",
+      "kutangaza"
+    ],
+    sw: "Masoko na kuhudumia wateja:\n\u2022 Elewa mteja wako: anahitaji nini, analalamika nini, na yuko wapi (sokoni au mtandaoni)?\n\u2022 Jenga JINA (brand) thabiti: jina, nembo, na ubora unaotabirika hujenga uaminifu.\n\u2022 Tumia njia nafuu: maneno ya mdomo (referrals), WhatsApp/Instagram/TikTok, na ushiriki wa jamii.\n\u2022 Huduma bora kwa mteja huleta wateja warudio \u2014 wao ni nafuu kuliko kutafuta wapya.\n\u2022 Pokea malalamiko kwa heshima na yarekebishe; mteja mmoja asiyeridhika huwaambia wengi.\nPima kinachofanya kazi (nani alinunua kwa sababu gani) kisha ongeza juhudi huko.",
+    en: "Marketing and customer service:\n\u2022 Understand your customer: what they need, what they complain about, and where they are (market or online).\n\u2022 Build a consistent BRAND: a name, a logo, and predictable quality build trust.\n\u2022 Use cheap channels: word of mouth (referrals), WhatsApp/Instagram/TikTok, and community presence.\n\u2022 Great service brings repeat customers \u2014 they are cheaper than finding new ones.\n\u2022 Handle complaints respectfully and fix them; one unhappy customer tells many.\nMeasure what works (who bought and why), then put more effort there.",
+    sources: [{ label: "Akili KB \u2014 Biashara", ref: "Masoko ya biashara ndogo" }]
+  },
+  {
+    id: "bima-hatari",
+    cues: [
+      "bima",
+      "insurance",
+      "hatari",
+      "risk",
+      "kuwaka moto",
+      "wizi",
+      "kinga",
+      "protection",
+      "majanga",
+      "dharura"
+    ],
+    sw: "Bima na kudhibiti hatari:\n\u2022 Biashara inakabili hatari: moto, wizi, mafuriko, ugonjwa, au mteja asiyelipa.\n\u2022 BIMA hubadilisha hasara kubwa isiyotarajiwa kuwa malipo madogo ya kawaida (premium).\n\u2022 Aina za kawaida: bima ya mali/moto, bima ya mizigo, bima ya afya, na bima ya gari (ni lazima kisheria).\n\u2022 Soma masharti vizuri: nini kimebimwa, kiasi cha kulipwa, na vighairi (exclusions).\n\u2022 Tumia kampuni za bima zilizosajiliwa; thibitisha usajili na TIRA.\n\u2022 Mbali na bima: tenga akiba ya dharura na usiweke mayai yote kapu moja.",
+    en: "Insurance and managing risk:\n\u2022 A business faces risks: fire, theft, floods, illness, or a non-paying customer.\n\u2022 INSURANCE turns a large unexpected loss into a small regular payment (premium).\n\u2022 Common types: property/fire, goods-in-transit, health, and motor cover (legally required).\n\u2022 Read the terms: what is covered, the payout, and the exclusions.\n\u2022 Use registered insurers; confirm registration with TIRA.\n\u2022 Beyond insurance: keep an emergency fund and don't put all eggs in one basket.",
+    sources: [
+      { label: "TIRA \u2014 Mamlaka ya Usimamizi wa Bima Tanzania" },
+      { label: "Akili KB \u2014 Biashara" }
+    ]
+  },
+  {
+    id: "madeni-mikopo",
+    cues: [
+      "deni",
+      "madeni",
+      "wadeni",
+      "debt",
+      "credit",
+      "kukopesha",
+      "kudai",
+      "mteja anadaiwa",
+      "kulipa deni",
+      "overdue",
+      "mauzo ya mkopo"
+    ],
+    sw: "Kusimamia madeni na mauzo ya mkopo:\n\u2022 Ukiuza kwa mkopo, ANDIKA: nani, kiasi gani, tarehe ya kulipa \u2014 bila kumbukumbu ni hasara.\n\u2022 Weka kikomo cha mkopo unaotoa; usikopeshe zaidi ya unavyoweza kuvumilia kupoteza.\n\u2022 Fuatilia wadeni kwa heshima lakini kwa uthabiti; kumbushia kabla na baada ya tarehe.\n\u2022 Wewe ukikopa: kopa kwa lengo la kuzalisha (mtaji), si kwa matumizi; hakikisha faida inalipa riba.\n\u2022 Epuka kuchukua mkopo mmoja kulipa mwingine (mzunguko wa madeni).\nDeni likigoma kabisa, mkataba/risiti ni ushahidi; suluhisho la mazungumzo ni bora kuliko ugomvi.",
+    en: "Managing debts and credit sales:\n\u2022 If you sell on credit, RECORD it: who, how much, due date \u2014 without records it becomes a loss.\n\u2022 Set a credit limit; never lend more than you can afford to lose.\n\u2022 Follow up debtors respectfully but firmly; remind before and after the due date.\n\u2022 When you borrow: borrow to produce (capital), not to consume; ensure profit covers the interest.\n\u2022 Avoid taking one loan to repay another (a debt spiral).\nIf a debt is refused, a contract/receipt is evidence; a negotiated solution beats a quarrel.",
+    sources: [{ label: "Akili KB \u2014 Biashara", ref: "Usimamizi wa madeni" }]
   }
 ];
 var DISCLAIMER_SW3 = "Kumbuka: haya ni maelezo ya jumla kwa elimu tu \u2014 SI ushauri wa kifedha binafsi. Kwa maamuzi makubwa ya pesa, shauriana na mtaalamu wa fedha au taasisi husika.";
@@ -30290,7 +31062,7 @@ function tokens4(s) {
 function score4(entry, qTokens, qNorm) {
   let s = 0;
   for (const c of entry.cues) {
-    if (hasCue4(qNorm, c)) s += 2;
+    if (hasCue5(qNorm, c)) s += 2;
     else if (qTokens.includes(c)) s += 1;
   }
   return s;
@@ -30336,6 +31108,1950 @@ ${DISCLAIMER_EN3}` : void 0;
   }
 };
 
+// src/akili/experts/logistiki/engine/duty.ts
+function estimateDuty(input) {
+  const customsValue = Math.max(0, input.customsValue || 0);
+  const dutyRate = Math.max(0, input.dutyRate || 0);
+  const vatRate = input.vatRate ?? 0.18;
+  const exciseRate = Math.max(0, input.exciseRate ?? 0);
+  const duty = Math.round(customsValue * dutyRate);
+  const excise = Math.round((customsValue + duty) * exciseRate);
+  const vat = Math.round((customsValue + duty + excise) * vatRate);
+  const total = duty + excise + vat;
+  const landedCost = customsValue + total;
+  return { customsValue, duty, excise, vat, total, landedCost };
+}
+
+// src/akili/experts/logistiki/engine/logistics-ai.ts
+function normalize3(q) {
+  return (q || "").toLowerCase().normalize("NFKD").replace(/[^\p{L}\p{N}\s.,-]/gu, " ").replace(/\s+/g, " ").trim();
+}
+function tokens5(q) {
+  return normalize3(q).split(" ").filter(Boolean);
+}
+var SYNONYM_GROUPS = [
+  ["ushuru", "duty", "import duty", "import tax", "kodi ya forodha", "customs duty"],
+  ["forodha", "customs", "clearance", "clearing"],
+  ["bandari", "port", "harbour", "harbor", "terminal"],
+  ["meli", "ship", "ocean", "sea", "vessel", "maritime", "baharini"],
+  ["ndege", "air", "aircraft", "airfreight", "air cargo", "anga"],
+  ["reli", "rail", "sgr", "train", "treni", "railway"],
+  ["barabara", "road", "truck", "lori", "trucking", "haulage"],
+  ["bima", "insurance", "cover", "liability"],
+  ["kontena", "container"],
+  ["mzigo", "cargo", "freight", "shipment", "goods", "consignment"],
+  ["bei", "price", "rate", "cost", "gharama", "nauli", "quote", "pricing", "tariff"],
+  ["fuatilia", "track", "tracking", "trace", "kufuatilia", "locate"],
+  ["wakala", "agent", "broker", "forwarder", "clearing agent", "c&f"],
+  ["transit", "kupitisha", "kupita", "bonded", "t1"],
+  ["nyaraka", "documents", "paperwork", "docs", "hati"],
+  ["mauzo", "export", "exports", "kuuza nje"],
+  ["uagizaji", "import", "imports", "kuagiza"],
+  ["ghala", "warehouse", "storage", "depot"],
+  ["mpaka", "border", "crossing", "cross-border", "mpakani"]
+];
+var SYNONYM_MAP = (() => {
+  const m = {};
+  for (const group of SYNONYM_GROUPS) {
+    for (const term of group) {
+      m[term] = group;
+    }
+  }
+  return m;
+})();
+function levensteinAtMost(a, b, maxDist) {
+  if (a === b) return true;
+  const la = a.length;
+  const lb = b.length;
+  if (Math.abs(la - lb) > maxDist) return false;
+  let prev = new Array(lb + 1);
+  let curr = new Array(lb + 1);
+  for (let j = 0; j <= lb; j++) prev[j] = j;
+  for (let i = 1; i <= la; i++) {
+    curr[0] = i;
+    let rowMin = curr[0];
+    for (let j = 1; j <= lb; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+      if (curr[j] < rowMin) rowMin = curr[j];
+    }
+    if (rowMin > maxDist) return false;
+    [prev, curr] = [curr, prev];
+  }
+  return prev[lb] <= maxDist;
+}
+function synonymCanonicals(qTokens) {
+  const set = /* @__PURE__ */ new Set();
+  for (const t of qTokens) {
+    const group = SYNONYM_MAP[t];
+    if (group) set.add(group[0]);
+  }
+  return set;
+}
+function canonicalOf(key) {
+  const g = SYNONYM_MAP[key];
+  return g ? g[0] : key;
+}
+var OFF_TOPIC = [
+  // health / medicine (sw + en)
+  "dawa",
+  "ugonjwa",
+  "daktari",
+  "malaria",
+  "dalili",
+  "afya",
+  "hospitali",
+  "medicine",
+  "disease",
+  "doctor",
+  "symptom",
+  "symptoms",
+  "health",
+  "clinic",
+  "pregnant",
+  "fever",
+  "vaccine",
+  // literature / books (sw + en)
+  "shairi",
+  "riwaya",
+  "kitabu",
+  "mwandishi",
+  "mashairi",
+  "poem",
+  "poetry",
+  "novel",
+  "book",
+  "author",
+  "literature"
+];
+var REFUSAL = {
+  topic: "refusal",
+  text: {
+    sw: "Mimi ni msaidizi wa CargoLink kwa masuala ya usafirishaji na ugavi tu (forodha, bandari, kontena, Incoterms, bei ya mizigo, kufuatilia mizigo, n.k.). Siwezi kusaidia masuala ya tiba/afya au fasihi/vitabu. Niulize swali la usafirishaji.",
+    en: "I am CargoLink's assistant for logistics & supply chain only (customs, ports, containers, Incoterms, freight pricing, shipment tracking, etc.). I cannot help with medicine/health or literature/books. Please ask me a logistics question."
+  }
+};
+var INTENTS = [
+  // ----- CUSTOMS -----------------------------------------------------------
+  {
+    topic: "customs",
+    strong: ["forodha", "customs", "tra", "tancis", "duty", "clearing"],
+    keys: ["tax", "kodi", "ushuru", "import", "uagizaji", "taffa", "tasac", "vat", "excise", "tin", "agent", "wakala"],
+    answer: {
+      sw: "Forodha Tanzania inasimamiwa na TRA kupitia mfumo wa kielektroniki TANCIS. Mawakala wa kusafirisha mizigo (Clearing & Forwarding) lazima wawe na leseni ya TAFFA; TASAC inasimamia huduma za baharini. Kodi kuu: ushuru wa forodha (import duty), VAT, na excise kwa baadhi ya bidhaa. Nyaraka muhimu: Bill of Lading, Commercial Invoice, Packing List, Certificate of Origin, na TIN ya mwagizaji. Kwa bidhaa zinazoondoka tena, kuna 'temporary import'.",
+      en: "Tanzanian customs is run by the TRA via the electronic TANCIS system. Clearing & Forwarding agents must hold a TAFFA licence; TASAC regulates maritime services. Core charges: import duty, VAT, and excise on some goods. Required docs: Bill of Lading, Commercial Invoice, Packing List, Certificate of Origin, and the importer's TIN. Goods that will leave again can use temporary import."
+    }
+  },
+  {
+    topic: "customs-docs",
+    strong: ["documents", "nyaraka", "paperwork", "bill of lading"],
+    keys: ["invoice", "ankara", "packing list", "certificate of origin", "doc", "hati"],
+    answer: {
+      sw: "Nyaraka za kuagiza mizigo Tanzania: (1) Bill of Lading / Airway Bill, (2) Commercial Invoice, (3) Packing List, (4) Certificate of Origin, (5) TIN ya mwagizaji, na pale inapohitajika vibali (mfano TBS/TMDA kwa bidhaa husika). Zote huwasilishwa kupitia TANCIS na wakala wa TAFFA.",
+      en: "Import documents for Tanzania: (1) Bill of Lading / Airway Bill, (2) Commercial Invoice, (3) Packing List, (4) Certificate of Origin, (5) importer's TIN, plus any required permits (e.g. TBS/TMDA for regulated goods). All are filed via TANCIS through a TAFFA agent."
+    }
+  },
+  // ----- PORTS -------------------------------------------------------------
+  {
+    topic: "ports",
+    strong: ["bandari", "port", "tpa", "ticts", "dar"],
+    keys: ["dar es salaam", "harbour", "terminal", "berth", "vessel", "meli", "central corridor", "transit", "drc", "zambia", "burundi", "rwanda", "uganda", "malawi"],
+    answer: {
+      sw: "Bandari ya Dar es Salaam inaendeshwa na TPA, na kituo cha makontena na TICTS. Ni lango kuu la Ukanda wa Kati (Central Corridor) kwa nchi zisizo na bahari: DRC, Zambia, Burundi, Rwanda, Uganda na Malawi. Mizigo ya transit hupita chini ya bondi (bond) hadi mpakani.",
+      en: "Dar es Salaam port is operated by the TPA, with its container terminal run by TICTS. It is the main gateway of the Central Corridor for landlocked countries: DRC, Zambia, Burundi, Rwanda, Uganda and Malawi. Transit cargo moves under bond to the border."
+    }
+  },
+  {
+    topic: "demurrage",
+    strong: ["demurrage", "detention", "demaraji"],
+    keys: ["free days", "siku za bure", "storage", "kontena", "container charges", "penalty", "faini"],
+    answer: {
+      sw: "Demurrage ni ada unayolipa kwa kontena kubaki bandarini/depo zaidi ya siku za bure (free days) za shirika la meli. Detention ni ada ya kuchelewesha kontena nje ya bandari (haujarudisha tupu kwa wakati). Ili kuepuka: kamilisha forodha mapema, panga usafiri wa kontena mapema, na rudisha kontena tupu ndani ya muda.",
+      en: "Demurrage is a fee for a container sitting at the port/depot beyond the shipping line's free days. Detention is a fee for keeping the container out of the port too long (not returning it empty in time). To avoid both: clear customs early, pre-arrange haulage, and return empties on time."
+    }
+  },
+  // ----- RAIL --------------------------------------------------------------
+  {
+    topic: "rail",
+    strong: ["reli", "rail", "sgr", "tazara", "trc"],
+    keys: ["train", "treni", "icd", "dry port", "kwala", "kurasini", "gauge"],
+    answer: {
+      sw: "Usafiri wa reli: SGR (Standard Gauge Railway) inaendeshwa na TRC kwa mizigo na abiria kati ya Dar na bara. TAZARA inaunganisha Tanzania na Zambia. Bandari kavu (ICD / dry ports) kama Kwala na Kurasini hupokea makontena kutoka bandarini kwa njia ya reli ili kupunguza msongamano.",
+      en: "Rail freight: the SGR (Standard Gauge Railway) is run by the TRC for cargo and passengers between Dar and the interior. TAZARA links Tanzania to Zambia. Inland container depots / dry ports such as Kwala and Kurasini receive containers from the port by rail to ease congestion."
+    }
+  },
+  // ----- ROAD / TRUCKING ---------------------------------------------------
+  {
+    topic: "road",
+    strong: ["barabara", "road", "truck", "lori", "latra", "tanroads", "axle"],
+    keys: ["weighbridge", "mizani", "haulage", "trucking", "load limit", "uzito", "transport"],
+    answer: {
+      sw: "Usafiri wa barabara unasimamiwa na LATRA (leseni za usafirishaji). TANROADS inaendesha mizani (weighbridges) kudhibiti uzito kwenye ekseli (axle-load limits) ili kulinda barabara. Lori linalozidi uzito hutozwa faini na kuzuiwa hadi lipunguze mzigo.",
+      en: "Road transport is regulated by LATRA (transport licensing). TANROADS operates weighbridges enforcing axle-load limits to protect the roads. Overloaded trucks are fined and held until they shed weight."
+    }
+  },
+  // ----- FREIGHT MODES -----------------------------------------------------
+  {
+    topic: "freight-modes",
+    strong: ["fcl", "lcl", "groupage", "container type", "reefer"],
+    keys: ["20ft", "40ft", "40hc", "container", "kontena", "ocean", "air", "sea", "mode", "njia ya usafiri", "consolidation"],
+    answer: {
+      sw: "Njia za mizigo: FCL (Full Container Load) = kontena lako pekee; LCL / groupage = unachangia kontena na watu wengine (unalipa kwa ujazo). Aina za kontena: 20ft (~28 CBM), 40ft (~58 CBM), 40HC (refu zaidi, ~68 CBM), na reefer (lenye baridi kwa bidhaa zinazoharibika). Bahari = rahisi kwa wingi, ndege = haraka kwa uzito mdogo, barabara = kwa ndani/mpakani.",
+      en: "Freight modes: FCL (Full Container Load) = your own container; LCL / groupage = you share a container and pay by volume. Container types: 20ft (~28 CBM), 40ft (~58 CBM), 40HC (taller, ~68 CBM), and reefer (refrigerated for perishables). Sea = cheap for volume, air = fast for light goods, road = for inland/cross-border."
+    }
+  },
+  // ----- INCOTERMS ---------------------------------------------------------
+  {
+    topic: "incoterms",
+    strong: ["incoterm", "incoterms", "exw", "fob", "cif", "cfr", "dap", "ddp"],
+    keys: ["delivery terms", "masharti ya uuzaji", "who pays", "nani analipa", "risk", "hatari"],
+    answer: {
+      sw: "Incoterms (masharti ya kibiashara): EXW = mnunuzi anabeba kila kitu kuanzia ghala la muuzaji. FOB = muuzaji hadi melini, mnunuzi anabeba kutoka hapo. CFR = muuzaji analipa nauli ya bahari (si bima). CIF = CFR + bima. DAP = muuzaji anafikisha mahali palipokubaliwa (bila forodha ya kuingiza). DDP = muuzaji analipa kila kitu pamoja na forodha hadi mlangoni.",
+      en: "Incoterms (trade terms): EXW = buyer bears everything from the seller's warehouse. FOB = seller up to the ship's rail, buyer from there. CFR = seller pays sea freight (not insurance). CIF = CFR + insurance. DAP = seller delivers to the agreed place (import duty excluded). DDP = seller pays everything including import customs, to the door."
+    }
+  },
+  // ----- PRICING -----------------------------------------------------------
+  {
+    topic: "pricing",
+    strong: ["bei", "price", "pricing", "rate", "nauli", "cost", "gharama", "quote"],
+    keys: ["how much", "tariff", "ushuru wa usafiri", "fuel", "mafuta", "tolls", "fee", "ada"],
+    answer: {
+      sw: "Bei ya mizigo hujengwa kwa: umbali, uzito au ujazo (chargeable weight \u2014 kubwa kati ya hizo mbili), nyongeza ya mafuta (fuel surcharge), ada za barabara/mizani (tolls), na ada za bandari/forodha. Kwa bahari LCL hulipwa kwa CBM; FCL kwa kontena. Ongeza demurrage/detention iwapo kuna ucheleweshaji.",
+      en: "Freight rates are built from: distance, weight or volume (chargeable weight \u2014 the greater of the two), fuel surcharge, road/weighbridge tolls, and port/customs fees. Sea LCL is charged per CBM; FCL per container. Add demurrage/detention if there are delays."
+    }
+  },
+  // ----- CARGOLINK HOW-TO --------------------------------------------------
+  {
+    topic: "cargolink-book",
+    strong: ["cargoshipment", "book a shipment", "weka mzigo", "agiza usafiri", "create shipment"],
+    keys: ["book", "booking", "post cargo", "weka mzigo", "tuma mzigo", "request", "order", "ship"],
+    answer: {
+      sw: "Kuweka CargoShipment kwenye CargoLink: fungua programu, chagua aina ya huduma, jaza chanzo na unakoenda, maelezo ya mzigo (uzito/ujazo/aina), kisha tuma ombi. Wabebaji (carriers) watatoa bei; chagua bora, lipa/thibitisha, na utafuatilia mzigo moja kwa moja.",
+      en: "To book a CargoShipment on CargoLink: open the app, pick a service type, enter pickup and destination, cargo details (weight/volume/type), then submit the request. Carriers quote a price; pick the best, confirm/pay, and track the shipment live."
+    }
+  },
+  {
+    topic: "cargolink-services",
+    strong: ["cityxpress", "intransit", "city delivery", "inter-city"],
+    keys: ["service", "huduma", "delivery", "usafirishaji wa mjini", "intercity", "mkoa", "ndani ya mji"],
+    answer: {
+      sw: "Huduma za CargoLink: CityXpress = usafirishaji wa haraka ndani ya mji (city delivery). InTransit = usafirishaji baina ya miji/mikoa (inter-city). CargoShipment = mizigo mikubwa/kontena. Chagua inayolingana na mzigo na umbali wako.",
+      en: "CargoLink services: CityXpress = fast within-city delivery. InTransit = inter-city / regional transport. CargoShipment = larger freight / containers. Pick the one matching your cargo and distance."
+    }
+  },
+  {
+    topic: "cargolink-track",
+    strong: ["track", "fuatilia", "tracking", "kufuatilia", "where is my"],
+    keys: ["status", "hali", "locate", "trace", "shipment status", "delivery status"],
+    answer: {
+      sw: "Kufuatilia mzigo: fungua orodha ya mizigo yako kwenye CargoLink, gusa mzigo husika, na utaona hali yake ya sasa (live tracking) \u2014 mahali, hatua iliyofikia, na muda unaotarajiwa. Utapokea pia arifa kila hali inapobadilika.",
+      en: "To track a shipment: open your shipments list in CargoLink, tap the shipment, and you'll see its live status \u2014 location, current stage, and ETA. You'll also get notifications whenever the status changes."
+    }
+  },
+  {
+    topic: "cargolink-rate",
+    strong: ["dispute", "malalamiko", "rate", "review", "kadiria", "ukadiriaji"],
+    keys: ["rating", "complaint", "report", "ripoti", "feedback", "star"],
+    answer: {
+      sw: "Baada ya safari unaweza kumkadiria mbebaji (nyota + maoni) ndani ya CargoLink. Kama kuna tatizo (uharibifu, ucheleweshaji, malipo), fungua malalamiko (dispute) kwenye mzigo husika; timu itashughulikia kwa kuangalia kumbukumbu za safari.",
+      en: "After a trip you can rate the carrier (stars + a review) inside CargoLink. If something went wrong (damage, delay, payment), open a dispute on that shipment; the team handles it using the trip records."
+    }
+  },
+  {
+    topic: "cargolink-partner",
+    strong: ["become a partner", "carrier", "forwarder", "warehouse", "kuwa mshirika", "mbebaji"],
+    keys: ["partner", "register", "jisajili", "join", "driver", "dereva", "ghala", "vendor", "onboard"],
+    answer: {
+      sw: "Kujiunga CargoLink kama mshirika: chagua jukumu \u2014 Carrier (mbebaji/dereva anayebeba mizigo), Forwarder (wakala wa kuratibu usafiri na forodha), au Warehouse (mwenye ghala la kuhifadhi mizigo). Jisajili, weka nyaraka/leseni, na ukikubaliwa utaanza kupokea kazi.",
+      en: "To join CargoLink as a partner: choose a role \u2014 Carrier (hauler/driver who moves cargo), Forwarder (agent coordinating transport & customs), or Warehouse (storage provider). Register, upload documents/licences, and once approved you start receiving jobs."
+    }
+  },
+  // =========================================================================
+  // TANZANIA GOVERNMENT & PARASTATAL AGENCIES — logistics / trade
+  // =========================================================================
+  // ----- TRA (Tanzania Revenue Authority) ----------------------------------
+  {
+    topic: "agency-tra",
+    strong: ["tra", "tanzania revenue authority", "mamlaka ya mapato"],
+    keys: ["revenue", "mapato", "duty", "ushuru", "vat", "vah", "excise", "tin", "efd", "receipt", "risiti", "kodi", "customs department", "idara ya forodha"],
+    answer: {
+      sw: "TRA (Tanzania Revenue Authority / Mamlaka ya Mapato Tanzania) ndiyo mamlaka ya kodi nchini. Idara ya Forodha (Customs & Excise) inakusanya ushuru wa forodha (import duty), VAT (18%), na excise duty kwa bidhaa kama mafuta, vileo na magari. TRA hutoa TIN (namba ya mlipakodi) na husimamia EFD (mashine za risiti za kielektroniki). Mfumo wake wa forodha ni TANCIS, na malipo hufanyika kupitia GePG.",
+      en: "The TRA (Tanzania Revenue Authority) is the national tax authority. Its Customs & Excise department collects import duty, VAT (18%), and excise duty on goods like fuel, alcohol and vehicles. The TRA issues the TIN (taxpayer ID) and enforces EFDs (electronic fiscal devices / receipts). Its customs platform is TANCIS, and payments flow through GePG."
+    }
+  },
+  // ----- TANCIS ------------------------------------------------------------
+  {
+    topic: "agency-tancis",
+    strong: ["tancis", "tansad", "single window", "declaration"],
+    keys: ["tanzania customs integrated system", "tazimisho", "assessment", "release", "gepg", "lodge", "declare", "tamko la forodha", "kuachilia mzigo"],
+    answer: {
+      sw: "TANCIS (Tanzania Customs Integrated System) ni mfumo wa kielektroniki wa TRA wa kushughulikia forodha. Hatua: (1) wakala wa TAFFA anawasilisha tamko la forodha (TANSAD \u2014 declaration), (2) mfumo unakadiria kodi (assessment) na kupanga njia ya ukaguzi (channel \u2014 kijani/njano/nyekundu), (3) malipo hufanyika kupitia GePG (control number), (4) baada ya malipo na ukaguzi, mzigo huachiliwa (release order). TANCIS inaunganishwa na TPA, bandari, na mfumo wa transit wa eneo la EAC.",
+      en: "TANCIS (Tanzania Customs Integrated System) is the TRA's electronic customs platform. Flow: (1) a TAFFA agent lodges the customs declaration (TANSAD), (2) the system assesses duties/taxes and assigns a control channel (green/yellow/red), (3) payment is made via GePG (a control number), (4) after payment and any inspection, the goods get a release order. TANCIS integrates with the TPA, the port, and the EAC transit system."
+    }
+  },
+  // ----- Customs regimes ---------------------------------------------------
+  {
+    topic: "customs-regimes",
+    strong: ["regime", "transit", "warehousing", "bonded", "temporary admission", "re-export"],
+    keys: ["home use", "matumizi ya nyumbani", "t1", "transit declaration", "temporary import", "uingizaji wa muda", "bond", "warehouse", "ghala la bondi", "re export", "kuondoa tena", "import for home use", "regimes"],
+    answer: {
+      sw: "Aina za regimes za forodha (TANCIS/EAC): (1) Import for home use \u2014 bidhaa zinabaki nchini, kodi zote zinalipwa; (2) Export \u2014 kupeleka nje; (3) Transit (T1) \u2014 mzigo unapita Tanzania kwenda nchi nyingine chini ya bondi, hauipiliwi kodi; (4) Temporary admission \u2014 bidhaa zinazoingia kwa muda (mfano vifaa vya maonyesho) bila kulipa kodi kamili; (5) Warehousing / bonded \u2014 bidhaa zinahifadhiwa kwenye ghala la bondi, kodi inalipwa zikitoka; (6) Re-export \u2014 kutoa tena bidhaa zilizoingizwa.",
+      en: "Customs regimes (TANCIS/EAC): (1) Import for home use \u2014 goods stay in-country, all duties paid; (2) Export; (3) Transit (T1) \u2014 cargo passes through Tanzania to another country under bond, duty-suspended; (4) Temporary admission \u2014 goods entering for a limited time (e.g. exhibition gear) without full duty; (5) Warehousing / bonded \u2014 goods stored in a bonded warehouse, duty paid on removal; (6) Re-export \u2014 re-exporting previously imported goods."
+    }
+  },
+  // ----- TASAC -------------------------------------------------------------
+  {
+    topic: "agency-tasac",
+    strong: ["tasac", "shipping agent", "wakala wa meli", "shipping agency"],
+    keys: ["tanzania shipping agents corporation", "freight forwarding", "single customs declaration for shipping", "maritime", "baharini", "licensing", "leseni", "ushirika wa mawakala"],
+    answer: {
+      sw: "TASAC (Tanzania Shipping Agents Corporation) ndiyo msimamizi na pia mtoa huduma wa sekta ya meli. Majukumu: kutoa leseni na kusimamia mawakala wa meli (shipping agents) na freight forwarders, kushughulikia Single Customs Declaration kwa upande wa meli, na kusimamia usalama na ushindani wa huduma za baharini. Ilianzishwa baada ya SUMATRA kugawanywa (LATRA + TASAC + nyingine).",
+      en: "TASAC (Tanzania Shipping Agents Corporation) is both the regulator and a service provider for the maritime sector. It licenses and regulates shipping agents and freight forwarders, handles the shipping-side single customs declaration, and oversees safety and fair competition in maritime services. It was created when SUMATRA was split (into LATRA + TASAC + others)."
+    }
+  },
+  // ----- TPA + TICTS + dry ports -------------------------------------------
+  {
+    topic: "agency-tpa",
+    strong: ["tpa", "tanzania ports authority", "ticts", "mamlaka ya bandari"],
+    keys: ["dar port", "tanga", "mtwara", "gate", "yard", "geti", "yadi", "icd", "cfs", "dry port", "bandari kavu", "kwala", "kurasini", "berth", "terminal", "stevedoring"],
+    answer: {
+      sw: "TPA (Tanzania Ports Authority / Mamlaka ya Bandari Tanzania) inamiliki na kusimamia bandari za Dar es Salaam, Tanga na Mtwara, pamoja na maziwa. Kituo cha makontena cha Dar kinaendeshwa na TICTS. TPA inasimamia geti, yadi, kupakua/kupakia meli (stevedoring) na inatoza demurrage kwa mizigo inayokaa muda mrefu. Bandari kavu (ICD/CFS) kama Kwala na Kurasini hupunguza msongamano kwa kupokea makontena kwa reli/barabara.",
+      en: "The TPA (Tanzania Ports Authority) owns and manages the ports of Dar es Salaam, Tanga and Mtwara, plus the lakes. Dar's container terminal is operated by TICTS. The TPA runs gates, yards, vessel handling (stevedoring) and charges storage/demurrage on cargo that overstays. Dry ports (ICD/CFS) such as Kwala and Kurasini ease congestion by receiving containers via rail/road."
+    }
+  },
+  // ----- TRC / SGR ---------------------------------------------------------
+  {
+    topic: "agency-sgr",
+    strong: ["sgr", "standard gauge", "trc", "tanzania railway", "makutupora", "morogoro"],
+    keys: ["reli ya kisasa", "electric", "umeme", "mwanza", "dodoma", "freight train", "treni ya mizigo", "icd link", "passenger", "abiria", "gauge ya kawaida"],
+    answer: {
+      sw: "SGR (Standard Gauge Railway) inaendeshwa na TRC (Tanzania Railway Corporation). Ni reli ya kisasa ya umeme inayobeba mizigo na abiria: Dar es Salaam \u2013 Morogoro \u2013 Makutupora (Dodoma), ikielekea Mwanza/Ziwa Victoria. Inafikia kasi na uzito mkubwa zaidi kuliko reli ya zamani (metre gauge), inaunganishwa na bandari kavu (ICD) ili kuhamisha makontena kutoka bandari ya Dar kwenda bara kwa haraka na gharama nafuu.",
+      en: "The SGR (Standard Gauge Railway) is operated by the TRC (Tanzania Railway Corporation). It is a modern electric line carrying freight and passengers: Dar es Salaam \u2013 Morogoro \u2013 Makutupora (Dodoma), extending toward Mwanza / Lake Victoria. It offers higher speed and capacity than the old metre-gauge line and connects to inland container depots (ICDs) to shift containers from Dar port to the interior faster and cheaper."
+    }
+  },
+  {
+    topic: "agency-tazara",
+    strong: ["tazara", "kapiri mposhi", "tanzania zambia railway"],
+    keys: ["zambia", "drc copperbelt", "copper", "shaba", "freedom railway", "uhuru railway", "reli ya uhuru"],
+    answer: {
+      sw: "TAZARA (Tanzania\u2013Zambia Railway Authority, 'Reli ya Uhuru') inaunganisha Dar es Salaam na Kapiri Mposhi nchini Zambia, ikihudumia mzigo wa shaba (copper) kutoka Copperbelt ya Zambia na DRC. Ni reli ya ushirikiano kati ya Tanzania na Zambia na nyenzo muhimu ya Ukanda wa Kati kwa nchi za kusini zisizo na bahari.",
+      en: "TAZARA (Tanzania\u2013Zambia Railway Authority, the 'Freedom Railway') links Dar es Salaam to Kapiri Mposhi in Zambia, serving copper traffic from the Zambian/DRC Copperbelt. Jointly owned by Tanzania and Zambia, it is a key Central Corridor artery for the southern landlocked countries."
+    }
+  },
+  // ----- LATRA -------------------------------------------------------------
+  {
+    topic: "agency-latra",
+    strong: ["latra", "land transport regulatory", "sumatra"],
+    keys: ["road licensing", "leseni ya barabara", "rail regulation", "transport licence", "successor", "split", "land transport", "usafiri wa nchi kavu"],
+    answer: {
+      sw: "LATRA (Land Transport Regulatory Authority) inasimamia usafiri wa nchi kavu \u2014 barabara na reli (leseni za mabasi, malori ya kibiashara, na huduma za reli). Ilitokana na kugawanywa kwa SUMATRA ya zamani, ambapo majukumu ya baharini yalikwenda TASAC na ya nchi kavu yakabaki LATRA. Carriers wa kibiashara wanahitaji leseni ya LATRA kuendesha usafirishaji wa mizigo.",
+      en: "LATRA (Land Transport Regulatory Authority) regulates land transport \u2014 road and rail (licensing buses, commercial trucks, and rail services). It was carved out of the former SUMATRA, with maritime duties going to TASAC and land duties staying with LATRA. Commercial carriers need a LATRA licence to operate freight transport."
+    }
+  },
+  // ----- TANROADS / weighbridge / axle load --------------------------------
+  {
+    topic: "agency-tanroads",
+    strong: ["tanroads", "weighbridge", "axle load", "axle-load", "mizani"],
+    keys: ["trunk roads", "barabara kuu", "regional roads", "overload", "uzito kupita kiasi", "vehicle load control", "eac load control", "gvm", "gross weight", "faini ya uzito", "axle weight"],
+    answer: {
+      sw: "TANROADS inasimamia barabara kuu (trunk) na za mikoa, na inaendesha mizani (weighbridges) kudhibiti uzito kwa kufuata EAC Vehicle Load Control Act. Kuna mipaka ya uzito kwa kila ekseli (axle-load) na uzito wa jumla (GVM); lori linalozidi hutozwa faini na kuzuiwa hadi lipunguze mzigo. Hii inalinda barabara dhidi ya uharibifu wa mapema.",
+      en: "TANROADS manages trunk and regional roads and operates weighbridges to enforce axle-load and gross vehicle mass (GVM) limits under the EAC Vehicle Load Control Act. Overloaded trucks are fined and held until they shed weight. This protects roads from premature damage."
+    }
+  },
+  // ----- TBS / PVoC --------------------------------------------------------
+  {
+    topic: "agency-tbs",
+    strong: ["tbs", "tanzania bureau of standards", "pvoc"],
+    keys: ["standards", "viwango", "pre-shipment", "conformity", "coc", "certificate of conformity", "inspection abroad", "kabla ya kusafirisha", "ubora", "quality"],
+    answer: {
+      sw: "TBS (Tanzania Bureau of Standards) husimamia viwango vya ubora na usalama wa bidhaa. Kwa bidhaa zinazoagizwa, mpango wa PVoC (Pre-export Verification of Conformity) unahitaji ukaguzi nchi ya asili kabla ya kusafirisha, na hutoa Certificate of Conformity (CoC). Bila CoC, bidhaa husika zinaweza kuzuiwa au kutozwa ada za ziada za ukaguzi bandarini.",
+      en: "TBS (Tanzania Bureau of Standards) sets product quality and safety standards. For regulated imports, the PVoC (Pre-export Verification of Conformity) scheme requires inspection in the country of origin before shipment, issuing a Certificate of Conformity (CoC). Without a CoC, affected goods can be held or face extra destination-inspection fees."
+    }
+  },
+  // ----- Other regulatory permit agencies ----------------------------------
+  {
+    topic: "agency-permits",
+    strong: ["tmda", "tphpa", "tfra", "tvla", "taec", "nemc", "permit agencies", "vibali"],
+    keys: ["tmda", "medicines device permit", "phytosanitary", "plant health", "afya ya mimea", "fertilizer", "mbolea", "livestock", "mifugo", "radioactive", "tochi za nyuklia", "government chemist", "fire and rescue", "dangerous goods", "bidhaa hatari", "wma", "weights and measures", "vipimo", "nemc", "eia", "mazingira", "osha", "fcc", "fair competition", "permit", "kibali"],
+    answer: {
+      sw: "Vibali maalum kwa bidhaa husika (mbali na TRA): TMDA \u2014 dawa na vifaa tiba; TPHPA \u2014 afya ya mimea / phytosanitary certificate; TFRA \u2014 mbolea; TVLA / Wizara ya Mifugo \u2014 wanyama na bidhaa za mifugo; Mkemia Mkuu wa Serikali (Government Chemist); TAEC \u2014 vyanzo vya mionzi (radioactive); Jeshi la Zimamoto \u2014 bidhaa hatari (dangerous goods); WMA \u2014 Vipimo (Weights & Measures); NEMC \u2014 mazingira / EIA; OSHA-TZ \u2014 usalama kazini; FCC (Fair Competition Commission) \u2014 ushindani wa haki. Bidhaa zinazohusika lazima ziwe na kibali husika kabla ya kuachiliwa forodha.",
+      en: "Special permits for regulated goods (beyond the TRA): TMDA \u2014 medicines & medical devices; TPHPA \u2014 plant health / phytosanitary certificate; TFRA \u2014 fertilizers; TVLA / livestock ministry \u2014 animals & animal products; Government Chemist; TAEC \u2014 radioactive sources; Fire & Rescue Force \u2014 dangerous goods; WMA \u2014 Weights & Measures; NEMC \u2014 environment / EIA; OSHA-TZ \u2014 occupational safety; FCC (Fair Competition Commission) \u2014 fair competition. Affected goods must carry the relevant permit before customs release."
+    }
+  },
+  // ----- TCAA / air cargo --------------------------------------------------
+  {
+    topic: "agency-tcaa",
+    strong: ["tcaa", "air cargo", "jnia", "kia", "civil aviation"],
+    keys: ["tanzania civil aviation authority", "airport", "uwanja wa ndege", "kilimanjaro", "julius nyerere", "airway bill", "awb", "perishables air", "ndege mzigo", "abia"],
+    answer: {
+      sw: "TCAA (Tanzania Civil Aviation Authority) inasimamia usafiri wa anga ikiwemo mizigo ya ndege (air cargo). Viwanja vikuu vya mizigo: JNIA (Julius Nyerere, Dar es Salaam) na KIA (Kilimanjaro, kwa mauzo ya nje kama maua na mboga). Mzigo wa ndege hutumia Airway Bill (AWB) na hulipiwa kwa chargeable weight (kubwa kati ya uzito halisi na volumetric). Ni haraka, bora kwa bidhaa zinazoharibika au zenye thamani kubwa.",
+      en: "TCAA (Tanzania Civil Aviation Authority) regulates aviation including air cargo. Main cargo airports: JNIA (Julius Nyerere, Dar es Salaam) and KIA (Kilimanjaro, used for exports such as flowers and vegetables). Air cargo uses an Airway Bill (AWB) and is charged on chargeable weight (the greater of actual and volumetric). It is fast, ideal for perishables or high-value goods."
+    }
+  },
+  // ----- Registration / payment rails --------------------------------------
+  {
+    topic: "agency-registration",
+    strong: ["brela", "nida", "ega", "business registration", "company registration"],
+    keys: ["tin registration", "sajili kampuni", "national id", "kitambulisho", "incorporation", "business name", "leseni ya biashara", "import licence", "egov"],
+    answer: {
+      sw: "Kabla ya kuagiza kibiashara: sajili biashara/kampuni BRELA (Business Registrations and Licensing Agency), pata TIN kutoka TRA, na NIDA hutoa kitambulisho cha taifa (national ID) kwa watu binafsi. eGA (e-Government Authority) inaratibu mifumo ya serikali mtandaoni. Hizi ndizo msingi wa kuwa mwagizaji/forwarder anayetambulika kisheria.",
+      en: "Before importing commercially: register the business/company with BRELA (Business Registrations and Licensing Agency), get a TIN from the TRA, and NIDA issues the national ID for individuals. eGA (e-Government Authority) coordinates government online systems. These form the foundation for being a legally recognised importer/forwarder."
+    }
+  },
+  {
+    topic: "agency-payments",
+    strong: ["gepg", "tips", "bank of tanzania", "bot", "government payment"],
+    keys: ["government e-payment gateway", "control number", "namba ya malipo", "instant payment", "malipo ya papo kwa papo", "tanzania instant payments", "mobile money", "central bank", "benki kuu"],
+    answer: {
+      sw: "Malipo ya serikali (ushuru, ada za bandari, vibali) hufanyika kupitia GePG (Government e-Payment Gateway) \u2014 mfumo unaotoa control number unayolipia benki au mobile money. Benki Kuu (Bank of Tanzania) inasimamia TIPS (Tanzania Instant Payments System) inayowezesha malipo ya papo kwa papo baina ya benki na watoa huduma za fedha. Kwenye forodha, control number ya GePG inathibitisha malipo kabla ya kuachiliwa mzigo.",
+      en: "Government payments (duties, port fees, permits) flow through GePG (Government e-Payment Gateway), which issues a control number you pay at a bank or via mobile money. The Bank of Tanzania runs TIPS (Tanzania Instant Payments System) enabling instant interbank/wallet payments. In customs, the GePG control number confirms payment before cargo release."
+    }
+  },
+  {
+    topic: "agency-immigration",
+    strong: ["immigration", "uhamiaji", "crew permit", "driver permit", "work permit"],
+    keys: ["visa", "kibali cha kazi", "cross-border driver", "dereva wa mpakani", "passport", "hati ya kusafiria", "crew", "wafanyakazi wa meli"],
+    answer: {
+      sw: "Idara ya Uhamiaji (Immigration) inasimamia vibali vya wafanyakazi wa kigeni wa meli (crew) na madereva wa kuvuka mpaka (cross-border drivers). Kwa usafirishaji wa kikanda, madereva wanahitaji hati halali za kusafiria na pale inapohitajika vibali vya kazi/transit. Hili ni muhimu kwa Ukanda wa Kati ambapo malori huvuka mipaka kwenda DRC, Zambia, Rwanda n.k.",
+      en: "The Immigration Department handles permits for foreign vessel crew and cross-border drivers. For regional transport, drivers need valid travel documents and, where required, work/transit permits. This matters for the Central Corridor where trucks cross borders into the DRC, Zambia, Rwanda, etc."
+    }
+  },
+  // =========================================================================
+  // REGIONAL & INTERNATIONAL FRAMEWORKS
+  // =========================================================================
+  {
+    topic: "framework-eac",
+    strong: ["eac", "single customs territory", "sct", "common external tariff", "cet"],
+    keys: ["east african community", "jumuiya ya afrika mashariki", "customs union", "umoja wa forodha", "one declaration", "tamko moja", "first point of entry", "duty paid at entry"],
+    answer: {
+      sw: "EAC (East African Community) ina Customs Union yenye Common External Tariff (CET) \u2014 viwango vya pamoja vya ushuru kwa bidhaa kutoka nje ya jumuiya (kwa kawaida 0% malighafi, 10% bidhaa nusu-malighafi, 25% bidhaa kamili, na 'sensitive items' juu zaidi). Single Customs Territory (SCT) huruhusu kodi kulipwa mara moja katika eneo la kwanza la kuingia na bidhaa kutembea ndani ya EAC kwa tamko moja, kupunguza vituo vya forodha mpakani.",
+      en: "The EAC (East African Community) operates a Customs Union with a Common External Tariff (CET) \u2014 shared duty bands on goods from outside the bloc (typically 0% raw materials, 10% intermediates, 25% finished goods, with higher 'sensitive items'). The Single Customs Territory (SCT) lets duty be paid once at the first point of entry and goods move within the EAC on a single declaration, cutting border customs stops."
+    }
+  },
+  {
+    topic: "framework-regional-blocs",
+    strong: ["comesa", "sadc", "afcfta", "regional bloc"],
+    keys: ["common market", "soko la pamoja", "southern africa", "continental free trade", "biashara huria", "preferential tariff", "rules of origin", "kanuni za asili", "free trade area", "tripartite"],
+    answer: {
+      sw: "Mikataba ya biashara ya kikanda inayohusu Tanzania: COMESA (soko la pamoja la mashariki na kusini mwa Afrika), SADC (Jumuiya ya Maendeleo Kusini mwa Afrika), na AfCFTA (African Continental Free Trade Area) \u2014 eneo huria la bara zima. Faida: ushuru wa upendeleo (preferential/0%) kwa bidhaa zenye Certificate of Origin inayothibitisha 'rules of origin'. Tanzania ni mwanachama wa SADC na AfCFTA; hii inafungua masoko makubwa kwa mauzo ya nje.",
+      en: "Regional trade arrangements relevant to Tanzania: COMESA (Common Market for Eastern & Southern Africa), SADC (Southern African Development Community), and AfCFTA (African Continental Free Trade Area) \u2014 the continent-wide free-trade zone. Benefit: preferential/zero tariffs for goods with a Certificate of Origin meeting 'rules of origin'. Tanzania is a SADC and AfCFTA member; this opens large markets for exports."
+    }
+  },
+  {
+    topic: "framework-wto-wco",
+    strong: ["wto", "wco", "trade facilitation agreement", "tfa", "hs code", "harmonized system", "revised kyoto"],
+    keys: ["world trade organization", "world customs organization", "tariff classification", "uainishaji wa bidhaa", "hs", "harmonised", "kyoto convention", "single window", "risk management", "aeo"],
+    answer: {
+      sw: "Kanuni za kimataifa: WTO (World Trade Organization) ina Trade Facilitation Agreement (TFA) inayohamasisha kurahisisha forodha (transparency, single window, pre-arrival processing). WCO (World Customs Organization) inasimamia Harmonized System (HS code) \u2014 mfumo wa tarakimu 6+ wa kuainisha bidhaa duniani (msingi wa kukokotoa ushuru), na Revised Kyoto Convention kwa taratibu za kisasa za forodha. HS code sahihi ndio ufunguo wa kodi sahihi.",
+      en: "International rules: the WTO (World Trade Organization) has a Trade Facilitation Agreement (TFA) promoting simpler customs (transparency, single window, pre-arrival processing). The WCO (World Customs Organization) maintains the Harmonized System (HS code) \u2014 the 6+ digit global goods-classification system that drives duty rates \u2014 and the Revised Kyoto Convention for modern customs procedures. The correct HS code is the key to the correct duty."
+    }
+  },
+  {
+    topic: "framework-aeo",
+    strong: ["aeo", "authorized economic operator", "authorised economic operator", "trusted trader"],
+    keys: ["compliance", "fast track", "green channel", "njia ya kijani", "reduced inspection", "ukaguzi mdogo", "accreditation", "mfanyabiashara aminifu"],
+    answer: {
+      sw: "AEO (Authorized Economic Operator) ni hadhi inayotolewa na TRA/EAC kwa wafanyabiashara wanaoaminika (compliant). Faida: ukaguzi mdogo (mara nyingi njia ya kijani), kuachiliwa haraka kwa mizigo, kipaumbele bandarini, na malipo ya kodi yaliyorahisishwa. Ili kupata AEO unahitaji rekodi nzuri ya ulipaji kodi, vitabu vizuri vya hesabu, usalama wa ugavi (supply-chain security), na ukaguzi wa TRA. Ni sawa na mpango wa 'trusted trader' wa kimataifa.",
+      en: "AEO (Authorized Economic Operator) is a status granted by the TRA/EAC to compliant, trusted traders. Benefits: reduced inspection (often green channel), faster cargo release, port priority, and simplified duty payment. To qualify you need a clean tax record, good bookkeeping, supply-chain security, and a TRA audit. It mirrors international 'trusted trader' programmes."
+    }
+  },
+  {
+    topic: "incoterms-2020-full",
+    strong: ["incoterms 2020", "fca", "cpt", "cip", "dpu", "fas", "all incoterms"],
+    keys: ["eleven", "kumi na moja", "ddp", "dap", "exw", "fob", "cif", "cfr", "any mode", "sea only", "delivered duty paid", "carriage paid"],
+    answer: {
+      sw: "Incoterms 2020 \u2014 sheria 11: Njia yoyote ya usafiri \u2014 EXW (Ex Works), FCA (Free Carrier), CPT (Carriage Paid To), CIP (Carriage & Insurance Paid To), DAP (Delivered At Place), DPU (Delivered at Place Unloaded), DDP (Delivered Duty Paid). Bahari/maji tu \u2014 FAS (Free Alongside Ship), FOB (Free On Board), CFR (Cost & Freight), CIF (Cost, Insurance & Freight). Hatari na gharama huhamia kutoka muuzaji kwenda mnunuzi mahali tofauti kwa kila term \u2014 EXW ni mzigo mdogo kwa muuzaji, DDP ni mzigo mkubwa zaidi.",
+      en: "Incoterms 2020 \u2014 the 11 rules: Any transport mode \u2014 EXW (Ex Works), FCA (Free Carrier), CPT (Carriage Paid To), CIP (Carriage & Insurance Paid To), DAP (Delivered At Place), DPU (Delivered at Place Unloaded), DDP (Delivered Duty Paid). Sea/inland-waterway only \u2014 FAS (Free Alongside Ship), FOB (Free On Board), CFR (Cost & Freight), CIF (Cost, Insurance & Freight). Risk and cost transfer from seller to buyer at a different point for each \u2014 EXW puts the least on the seller, DDP the most."
+    }
+  },
+  {
+    topic: "corridors",
+    strong: ["central corridor", "ukanda wa kati", "dar corridor"],
+    keys: ["dar gateway", "landlocked", "isiyo na bahari", "burundi", "rwanda", "uganda", "malawi", "transit route", "njia ya transit", "competing ports"],
+    answer: {
+      sw: "Ukanda wa Kati (Central Corridor) unaanzia bandari ya Dar es Salaam kwenda nchi zisizo na bahari: DRC (mashariki), Burundi, Rwanda, Uganda, Zambia na Malawi \u2014 kwa barabara, SGR/reli na TAZARA. Ukanda wa Kaskazini (Northern Corridor) unaanzia Mombasa (Kenya). Wateja huchagua kati ya Dar na Mombasa kwa kuzingatia umbali, gharama, msongamano na muda wa transit. Dar ina nafasi nzuri kwa DRC ya kusini-mashariki, Burundi, Rwanda na Zambia.",
+      en: "The Central Corridor starts at Dar es Salaam port serving landlocked countries: DRC (east), Burundi, Rwanda, Uganda, Zambia and Malawi \u2014 by road, SGR/rail and TAZARA. The Northern Corridor starts at Mombasa (Kenya). Shippers choose between Dar and Mombasa on distance, cost, congestion and transit time. Dar is well placed for south-eastern DRC, Burundi, Rwanda and Zambia."
+    }
+  },
+  // =========================================================================
+  // WORLD-CLASS BENCHMARKS — best practice / how we compare
+  // =========================================================================
+  {
+    topic: "benchmark-single-window",
+    strong: ["tradenet", "uni-pass", "uni pass", "naccs", "single window benchmark", "best practice", "world class", "how do we compare"],
+    keys: ["singapore", "korea", "japan", "china single window", "cbp", "ace", "cbsa", "carm", "ucc", "portbase", "dp world", "networked trade platform", "benchmark", "kiwango cha dunia", "tunalinganaje"],
+    answer: {
+      sw: "Mifumo bora ya dunia ya biashara/forodha: Singapore \u2014 TradeNet & Networked Trade Platform (single window ya kwanza duniani); Korea \u2014 UNI-PASS (forodha ya kielektroniki inayouzwa nje); Japan \u2014 NACCS; China \u2014 Single Window ya taifa; Marekani \u2014 CBP/ACE; Canada \u2014 CBSA/CARM; EU \u2014 Union Customs Code (UCC); Uholanzi \u2014 Portbase (community system ya bandari); na DP World kwa uendeshaji wa bandari. Lengo la CargoLink: kuunganisha forodha, bandari, reli/SGR, barabara na malipo kuwa mfumo mmoja wa biashara+ugavi wa Tanzania unaolingana au kuzidi viwango hivi \u2014 lakini wa kidijitali, wa wenyeji na wa bei nafuu.",
+      en: "World-class trade/customs systems: Singapore \u2014 TradeNet & the Networked Trade Platform (the first national single window); Korea \u2014 UNI-PASS (an exported e-customs system); Japan \u2014 NACCS; China \u2014 national Single Window; USA \u2014 CBP/ACE; Canada \u2014 CBSA/CARM; EU \u2014 Union Customs Code (UCC); Netherlands \u2014 Portbase (a port community system); and DP World for port operations. CargoLink's ambition: unify customs, ports, rail/SGR, road and payments into one Tanzanian trade + supply-chain OS that matches or exceeds these benchmarks \u2014 but sovereign, locally owned and affordable."
+    }
+  },
+  // =========================================================================
+  // PROCESS PLAYBOOKS (step-by-step)
+  // =========================================================================
+  {
+    topic: "playbook-import-container",
+    strong: ["how to import a container", "import a container", "kuagiza kontena", "jinsi ya kuagiza"],
+    keys: ["import container", "steps to import", "hatua za kuagiza", "shipping a container to tanzania", "bring container", "leta kontena"],
+    answer: {
+      sw: "Kuagiza kontena Tanzania (hatua): (1) Sajili biashara BRELA + pata TIN (TRA); (2) Pata pro-forma invoice na kubaliana Incoterm na muuzaji; (3) Hakikisha vibali (TBS/PVoC, TMDA, n.k.) kama bidhaa zinahitaji; (4) Bidhaa zinasafirishwa, unapata Bill of Lading; (5) Mteue wakala wa TAFFA awasilishe TANSAD kwenye TANCIS; (6) Lipa ushuru/VAT kupitia control number ya GePG; (7) TPA/TICTS wanatoa kontena baada ya release order; (8) Panga usafiri (SGR/lori) hadi ghala lako \u2014 rudisha kontena tupu kuepuka detention.",
+      en: "Importing a container into Tanzania (steps): (1) Register the business with BRELA + get a TIN (TRA); (2) Obtain a pro-forma invoice and agree an Incoterm with the seller; (3) Secure permits (TBS/PVoC, TMDA, etc.) if the goods are regulated; (4) Goods ship; you receive the Bill of Lading; (5) Appoint a TAFFA agent to lodge the TANSAD in TANCIS; (6) Pay duty/VAT via the GePG control number; (7) TPA/TICTS release the container after the release order; (8) Arrange haulage (SGR/truck) to your warehouse \u2014 return the empty to avoid detention."
+    }
+  },
+  {
+    topic: "playbook-clear-customs",
+    strong: ["how to clear customs", "clear customs", "kutoa mzigo forodha", "kupitisha forodha"],
+    keys: ["clearance steps", "hatua za forodha", "clearing process", "customs clearance how", "release goods", "toa mzigo bandarini"],
+    answer: {
+      sw: "Kutoa mzigo forodha (clearance): (1) Kusanya nyaraka \u2014 Bill of Lading, Invoice, Packing List, Certificate of Origin, vibali; (2) Wakala wa TAFFA anawasilisha tamko (TANSAD) kwenye TANCIS na kuainisha HS code; (3) TANCIS inakadiria kodi na kupanga channel (kijani=hakuna ukaguzi, njano=ukaguzi wa nyaraka, nyekundu=ukaguzi wa kimwili); (4) Lipa kupitia GePG; (5) Kama ni nyekundu, mzigo unakaguliwa; (6) Release order inatolewa; (7) Lipa ada za TPA/shipping line, chukua mzigo. Kuwa AEO hupunguza ukaguzi na muda.",
+      en: "Clearing customs: (1) Gather docs \u2014 Bill of Lading, Invoice, Packing List, Certificate of Origin, permits; (2) A TAFFA agent lodges the declaration (TANSAD) in TANCIS and classifies the HS code; (3) TANCIS assesses duty and assigns a channel (green=no inspection, yellow=document check, red=physical exam); (4) Pay via GePG; (5) If red, the cargo is examined; (6) A release order is issued; (7) Pay TPA/shipping-line charges and take delivery. AEO status reduces inspection and time."
+    }
+  },
+  {
+    topic: "playbook-sgr-cargo",
+    strong: ["how to move cargo by sgr", "move cargo by sgr", "kusafirisha kwa sgr", "mzigo kwa reli"],
+    keys: ["sgr booking", "rail freight booking", "panga treni", "container on sgr", "icd loading", "reli mzigo hatua"],
+    answer: {
+      sw: "Kusafirisha mzigo kwa SGR: (1) Kamilisha forodha bandari ya Dar (au tumia transit kwenda ICD); (2) Kontena linahamishwa kutoka TICTS hadi kituo cha reli/ICD; (3) Weka booking ya mzigo na TRC kwa treni ya mizigo; (4) Kontena linapakiwa kwenye behewa, treni inaelekea Morogoro/Dodoma/Makutupora kuelekea Mwanza; (5) Kufika ICD ya bara, kontena linatolewa na kupelekwa kwa lori hadi mlangoni. Faida: nafuu na haraka zaidi kuliko lori kwa umbali mrefu, na kupunguza msongamano wa barabara.",
+      en: "Moving cargo by SGR: (1) Clear customs at Dar port (or move under transit to an ICD); (2) The container transfers from TICTS to the rail/ICD terminal; (3) Place a freight booking with the TRC; (4) The container is loaded onto a wagon and the train runs to Morogoro/Dodoma/Makutupora toward Mwanza; (5) At the inland ICD the container is offloaded and trucked to the door. Benefits: cheaper and faster than trucking over long distances, and it eases road congestion."
+    }
+  },
+  {
+    topic: "playbook-transit",
+    strong: ["how to transit", "transit to zambia", "transit to drc", "kupitisha mzigo", "transit kwenda"],
+    keys: ["transit cargo", "t1", "bond", "bonded transit", "drc", "zambia", "burundi", "rwanda", "cross border", "kuvuka mpaka", "landlocked transit", "kwenda nje ya nchi"],
+    answer: {
+      sw: "Kupitisha mzigo (transit) kwenda DRC/Zambia/nchi isiyo na bahari: (1) Mzigo unafika Dar kama transit (hauipiliwi kodi ya Tanzania); (2) Wakala anawasilisha transit declaration (T1) kwenye TANCIS chini ya bondi (customs bond) ya kuhakikisha mzigo unaondoka; (3) Mzigo unasafirishwa kwa SGR/TAZARA/lori chini ya ufuatiliaji (mfano electronic cargo tracking) kupitia Ukanda wa Kati; (4) Mpakani (mfano Tunduma kwa Zambia, Kasumbalesa/Kabanga kwa DRC) mzigo unathibitishwa kuondoka; (5) Bondi inafungwa (acquittal). Forodha halisi inalipwa nchi ya mwisho.",
+      en: "Transiting cargo to the DRC/Zambia/a landlocked country: (1) Cargo arrives at Dar as transit (no Tanzanian duty); (2) The agent lodges a transit declaration (T1) in TANCIS under a customs bond guaranteeing the cargo leaves; (3) It moves by SGR/TAZARA/truck under tracking (e.g. electronic cargo tracking) via the Central Corridor; (4) At the border (e.g. Tunduma for Zambia, Kasumbalesa/Kabanga toward the DRC) exit is confirmed; (5) The bond is acquitted. Actual duty is paid in the destination country."
+    }
+  },
+  {
+    topic: "playbook-become-agent",
+    strong: ["become a clearing agent", "licensed clearing agent", "taffa licence", "kuwa wakala wa forodha", "clearing agent licence"],
+    keys: ["taffa", "tasac licence", "freight forwarder licence", "leseni ya forwarding", "customs agent", "c&f licence", "how to be agent", "wakala wa forodha"],
+    answer: {
+      sw: "Kuwa wakala wa forodha/clearing & forwarding (C&F) aliyeidhinishwa: (1) Sajili kampuni BRELA + TIN; (2) Jiunge/ufuzu na TAFFA (Tanzania Freight Forwarders Association) na ufaulu mafunzo/mtihani wa weledi; (3) Pata leseni ya TASAC kwa huduma za freight forwarding (na za baharini); (4) Hakikisha una dhamana/bond ya forodha inayohitajika; (5) Pata akaunti ya kuingia TANCIS ili kuwasilisha matamko kwa niaba ya wateja. Kudumisha leseni kunahitaji uadilifu wa kodi na kufuata kanuni za TRA/TASAC.",
+      en: "Becoming a licensed clearing & forwarding (C&F) agent: (1) Register a company with BRELA + TIN; (2) Join/qualify through TAFFA (Tanzania Freight Forwarders Association) and pass the competence training/exam; (3) Obtain a TASAC licence for freight-forwarding (and maritime) services; (4) Hold the required customs bond/guarantee; (5) Get a TANCIS login to lodge declarations on clients' behalf. Keeping the licence requires tax compliance and adherence to TRA/TASAC rules."
+    }
+  },
+  {
+    topic: "playbook-export-docs",
+    strong: ["export documents", "what documents for export", "nyaraka za kuuza nje", "kusafirisha nje"],
+    keys: ["export", "mauzo ya nje", "export declaration", "tamko la mauzo", "certificate of origin export", "phytosanitary export", "export permit", "kuuza nje hatua"],
+    answer: {
+      sw: "Nyaraka za kuuza nje (export) Tanzania: (1) Commercial Invoice na Packing List; (2) Export declaration kwenye TANCIS (kupitia wakala wa TAFFA); (3) Certificate of Origin (mfano EAC/SADC/AfCFTA kwa upendeleo wa ushuru); (4) Bill of Lading / Airway Bill; (5) vyeti maalum kulingana na bidhaa \u2014 phytosanitary (TPHPA) kwa mazao, vyeti vya ubora (TBS), au vibali vya madini/mifugo. Baadhi ya bidhaa za asili zinahitaji vibali vya wizara husika kabla ya kusafirisha.",
+      en: "Export documents for Tanzania: (1) Commercial Invoice and Packing List; (2) an export declaration in TANCIS (via a TAFFA agent); (3) Certificate of Origin (e.g. EAC/SADC/AfCFTA for tariff preference); (4) Bill of Lading / Airway Bill; (5) commodity-specific certificates \u2014 phytosanitary (TPHPA) for produce, quality certificates (TBS), or mineral/livestock permits. Some natural-resource goods need sector-ministry permits before shipment."
+    }
+  },
+  // =========================================================================
+  // PAN-AFRICAN — REGIONAL ECONOMIC COMMUNITIES / CUSTOMS UNIONS
+  // =========================================================================
+  {
+    topic: "africa-afcfta",
+    strong: ["afcfta", "continental free trade", "guided trade initiative", "gti"],
+    keys: ["african continental free trade area", "biashara huria ya bara", "au", "african union", "umoja wa afrika", "single market", "soko moja la afrika", "tariff liberalisation", "rules of origin", "kanuni za asili", "55 countries", "secretariat accra", "continental", "bara zima"],
+    answer: {
+      sw: "AfCFTA (African Continental Free Trade Area) ni eneo huria la biashara la bara zima la Afrika, lililoanzishwa na Umoja wa Afrika (AU) \u2014 wanachama 54/55, sekretarieti Accra (Ghana). Lengo: kuondoa ushuru kwa ~90% ya bidhaa hatua kwa hatua, kufungua soko moja la Afrika. Bidhaa hupata upendeleo zikiwa na AfCFTA Certificate of Origin inayothibitisha 'rules of origin'. Guided Trade Initiative (GTI) ndiyo awamu ya majaribio ya biashara halisi chini ya AfCFTA. AfCFTA haifuti EAC/SADC/COMESA \u2014 inazikusanya pamoja kibara.",
+      en: "AfCFTA (African Continental Free Trade Area) is the continent-wide free-trade area established by the African Union (AU) \u2014 54/55 members, secretariat in Accra (Ghana). Goal: progressively remove tariffs on ~90% of goods, creating a single African market. Goods get preference with an AfCFTA Certificate of Origin meeting the 'rules of origin'. The Guided Trade Initiative (GTI) is the live pilot phase of trading under AfCFTA. AfCFTA does not replace the EAC/SADC/COMESA \u2014 it brings them together continentally."
+    }
+  },
+  {
+    topic: "africa-sadc",
+    strong: ["sadc", "southern african development community", "north-south corridor", "north south corridor"],
+    keys: ["sadc fta", "protocol on trade", "southern africa", "kusini mwa afrika", "south africa", "zambia", "zimbabwe", "mozambique", "namibia", "botswana", "malawi", "lesotho", "eswatini", "angola", "drc", "free trade area sadc", "preferential"],
+    answer: {
+      sw: "SADC (Southern African Development Community) ina Free Trade Area chini ya SADC Protocol on Trade \u2014 ushuru wa upendeleo (mara nyingi 0%) kwa bidhaa zenye SADC Certificate of Origin kati ya wanachama. Wanachama: Afrika Kusini, Tanzania, Zambia, Zimbabwe, Msumbiji, Namibia, Botswana, Malawi, Lesotho, Eswatini, Angola, DRC n.k. SADC si customs union kamili (haina CET ya pamoja) \u2014 kila nchi ina ushuru wake kwa nje. North\u2013South Corridor (Durban\u2192Zambia/DRC) ni njia kuu ya SADC. Tanzania ni mwanachama wa SADC na EAC kwa wakati mmoja.",
+      en: "SADC (Southern African Development Community) runs a Free Trade Area under the SADC Protocol on Trade \u2014 preferential (often 0%) tariffs on goods with a SADC Certificate of Origin between members. Members: South Africa, Tanzania, Zambia, Zimbabwe, Mozambique, Namibia, Botswana, Malawi, Lesotho, Eswatini, Angola, DRC, etc. SADC is not a full customs union (no common CET) \u2014 each country keeps its own external tariff. The North\u2013South Corridor (Durban\u2192Zambia/DRC) is SADC's main artery. Tanzania belongs to both SADC and the EAC."
+    }
+  },
+  {
+    topic: "africa-ecowas",
+    strong: ["ecowas", "etls", "economic community of west african states"],
+    keys: ["west africa", "afrika magharibi", "ecowas cet", "ecowas trade liberalisation scheme", "nigeria", "ghana", "cote d ivoire", "ivory coast", "senegal", "benin", "togo", "mali", "burkina faso", "niger", "ecowas certificate of origin", "common external tariff west"],
+    answer: {
+      sw: "ECOWAS (Economic Community of West African States) inaunganisha nchi 15 za Afrika Magharibi (Nigeria, Ghana, C\xF4te d'Ivoire, Senegal, Benin, Togo, Mali, Burkina Faso, Niger n.k.). ETLS (ECOWAS Trade Liberalisation Scheme) huruhusu bidhaa zenye asili ya ECOWAS kuuzwa bila ushuru kati ya wanachama. ECOWAS ina Common External Tariff (CET) yenye mistari mitano: 0%, 5%, 10%, 20% na 35% kwa bidhaa za nje ya kanda. UEMOA/WAEMU (nchi zinazotumia faranga CFA) ni customs union ndani ya ECOWAS.",
+      en: "ECOWAS (Economic Community of West African States) unites 15 West African countries (Nigeria, Ghana, C\xF4te d'Ivoire, Senegal, Benin, Togo, Mali, Burkina Faso, Niger, etc.). The ETLS (ECOWAS Trade Liberalisation Scheme) lets ECOWAS-origin goods trade duty-free between members. ECOWAS has a Common External Tariff (CET) with five bands: 0%, 5%, 10%, 20% and 35% on goods from outside the region. UEMOA/WAEMU (the CFA-franc states) is a customs union within ECOWAS."
+    }
+  },
+  {
+    topic: "africa-comesa",
+    strong: ["comesa", "yellow card", "rctg", "common market for eastern and southern africa"],
+    keys: ["comesa fta", "comesa cet", "comesa certificate of origin", "regional customs transit guarantee", "carnet", "yellow card insurance", "motor insurance", "bima ya gari", "eastern southern africa", "egypt", "kenya", "zambia", "zimbabwe", "drc", "comesa member"],
+    answer: {
+      sw: "COMESA (Common Market for Eastern & Southern Africa) ni soko la pamoja la nchi ~21 (Misri, Kenya, Zambia, Zimbabwe, DRC, Rwanda, Burundi n.k.). Ina Free Trade Area (ushuru 0% kwa bidhaa zenye COMESA Certificate of Origin) na inalenga COMESA CET. Vyombo muhimu: COMESA Yellow Card \u2014 bima ya gari (third-party) inayotambulika mipakani ya nchi wanachama; na RCTG Carnet (Regional Customs Transit Guarantee) \u2014 dhamana moja ya transit inayotumika nchi nzima badala ya bondi kila mpaka. Tanzania iliondoka COMESA lakini bado ipo SADC + EAC.",
+      en: "COMESA (Common Market for Eastern & Southern Africa) is a common market of ~21 countries (Egypt, Kenya, Zambia, Zimbabwe, DRC, Rwanda, Burundi, etc.). It runs a Free Trade Area (0% duty on goods with a COMESA Certificate of Origin) and targets a COMESA CET. Key instruments: the COMESA Yellow Card \u2014 third-party motor insurance recognised across member borders; and the RCTG Carnet (Regional Customs Transit Guarantee) \u2014 a single transit bond honoured region-wide instead of a fresh bond at each border. Tanzania left COMESA but remains in SADC + the EAC."
+    }
+  },
+  {
+    topic: "africa-other-blocs",
+    strong: ["cemac", "eccas", "uma", "amu", "maghreb", "igad", "cen-sad", "cen sad"],
+    keys: ["central africa", "afrika ya kati", "economic community of central african states", "arab maghreb union", "umoja wa maghreb", "morocco", "algeria", "tunisia", "libya", "mauritania", "igad horn", "djibouti", "ethiopia", "somalia", "south sudan", "cameroon", "gabon", "chad", "cfa central", "blocs"],
+    answer: {
+      sw: "Jumuiya nyingine za kikanda za Afrika: CEMAC/ECCAS \u2014 Afrika ya Kati (Cameroon, Gabon, Chad, CAR, Congo, Equatorial Guinea; CEMAC ni customs union ya faranga CFA ya kati). UMA/AMU (Arab Maghreb Union) \u2014 Maghreb (Morocco, Algeria, Tunisia, Libya, Mauritania). IGAD \u2014 Pembe ya Afrika (Ethiopia, Djibouti, Somalia, Sudan, South Sudan, Kenya, Uganda). CEN-SAD \u2014 nchi za Sahel-Sahara. Zote ni 'building blocks' za AfCFTA; nchi nyingi ni wanachama wa zaidi ya jumuiya moja (overlap), hivyo CET inayotumika hutegemea customs union husika ya nchi hiyo.",
+      en: "Other African regional bodies: CEMAC/ECCAS \u2014 Central Africa (Cameroon, Gabon, Chad, CAR, Congo, Equatorial Guinea; CEMAC is the central CFA-franc customs union). UMA/AMU (Arab Maghreb Union) \u2014 the Maghreb (Morocco, Algeria, Tunisia, Libya, Mauritania). IGAD \u2014 the Horn of Africa (Ethiopia, Djibouti, Somalia, Sudan, South Sudan, Kenya, Uganda). CEN-SAD \u2014 the Sahel-Saharan states. All are AfCFTA 'building blocks'; many countries belong to more than one bloc (overlap), so the CET that applies depends on that country's actual customs union."
+    }
+  },
+  {
+    topic: "africa-sacu",
+    strong: ["sacu", "southern african customs union", "burs"],
+    keys: ["south africa", "botswana", "namibia", "lesotho", "eswatini", "common revenue pool", "common external tariff sacu", "oldest customs union", "rand", "common customs area"],
+    answer: {
+      sw: "SACU (Southern African Customs Union) ni customs union kongwe zaidi duniani: Afrika Kusini, Botswana, Namibia, Lesotho na Eswatini. Ina Common External Tariff moja na eneo moja la forodha \u2014 bidhaa zinapoingia popote SACU hulipia ushuru mara moja na kutembea bila forodha ndani. Mapato ya ushuru hugawanywa kwa 'common revenue pool'. SARS (Afrika Kusini) ndiyo huendesha tariff; Botswana hutumia BURS. SACU ipo ndani ya SADC.",
+      en: "SACU (Southern African Customs Union) is the world's oldest customs union: South Africa, Botswana, Namibia, Lesotho and Eswatini. It has a single Common External Tariff and one customs area \u2014 goods entering anywhere in SACU pay duty once and move duty-free internally. Duty revenue is shared via a 'common revenue pool'. SARS (South Africa) administers the tariff; Botswana uses BURS. SACU sits inside SADC."
+    }
+  },
+  // =========================================================================
+  // PAN-AFRICAN — COUNTRY CUSTOMS / REVENUE AUTHORITIES + VAT
+  // =========================================================================
+  {
+    topic: "country-kenya",
+    strong: ["kra", "kenya revenue authority", "icms", "simba"],
+    keys: ["kenya", "kenya customs", "mombasa", "vat 16", "vat 16%", "import duty kenya", "idf", "rdl", "railway development levy", "northern corridor", "nairobi icd", "kenyan vat"],
+    answer: {
+      sw: "Kenya: forodha husimamiwa na KRA (Kenya Revenue Authority) kupitia iCMS (zamani Simba system). VAT ni 16%. Tozo nyingine: Import Declaration Fee (IDF ~2.5%), Railway Development Levy (RDL ~2%), na import duty kwa EAC CET (0/10/25%). Lango kuu: bandari ya Mombasa (Ukanda wa Kaskazini) inayohudumia Kenya, Uganda, Rwanda, DRC mashariki na South Sudan. KRA ni mwanachama wa EAC SCT.",
+      en: "Kenya: customs is run by the KRA (Kenya Revenue Authority) via iCMS (formerly the Simba system). VAT is 16%. Other charges: Import Declaration Fee (IDF ~2.5%), Railway Development Levy (RDL ~2%), plus import duty under the EAC CET (0/10/25%). Main gateway: the port of Mombasa (Northern Corridor) serving Kenya, Uganda, Rwanda, eastern DRC and South Sudan. The KRA participates in the EAC SCT."
+    }
+  },
+  {
+    topic: "country-uganda",
+    strong: ["ura", "uganda revenue authority"],
+    keys: ["uganda", "asycuda", "asycudaworld", "vat 18", "vat 18%", "kampala", "landlocked", "northern corridor uganda", "malaba", "busia", "ugandan vat"],
+    answer: {
+      sw: "Uganda: forodha husimamiwa na URA (Uganda Revenue Authority) kwa kutumia ASYCUDAWorld. VAT ni 18%, pamoja na import duty ya EAC CET. Uganda haina bahari \u2014 hupokea mizigo kwa transit kupitia Mombasa (Ukanda wa Kaskazini) au Dar (Ukanda wa Kati), ikipita mpaka Malaba/Busia (Kenya) au mipaka ya Tanzania. URA ni sehemu ya EAC SCT (kodi hulipwa eneo la kwanza la kuingia).",
+      en: "Uganda: customs is run by the URA (Uganda Revenue Authority) on ASYCUDAWorld. VAT is 18%, plus EAC CET import duty. Uganda is landlocked \u2014 cargo arrives in transit via Mombasa (Northern Corridor) or Dar (Central Corridor), crossing at Malaba/Busia (Kenya) or Tanzanian borders. The URA is part of the EAC SCT (duty paid at the first point of entry)."
+    }
+  },
+  {
+    topic: "country-rwanda-burundi",
+    strong: ["rra", "rwanda revenue authority", "obr", "office burundais des recettes"],
+    keys: ["rwanda", "burundi", "kigali", "bujumbura", "vat 18 rwanda", "vat 18%", "landlocked", "central corridor", "northern corridor", "gatuna", "rusumo", "kabanga", "rwandan vat"],
+    answer: {
+      sw: "Rwanda: forodha husimamiwa na RRA (Rwanda Revenue Authority), VAT 18%, EAC CET. Burundi: husimamiwa na OBR (Office Burundais des Recettes), VAT ~18%. Zote hazina bahari \u2014 hupokea mizigo kwa transit kupitia Dar (Ukanda wa Kati, mpaka Rusumo/Kabanga) au Mombasa (Ukanda wa Kaskazini, mpaka Gatuna). Rwanda na Burundi ni wanachama wa EAC; Rwanda pia COMESA. Kodi za EAC hulipwa eneo la kwanza la kuingia chini ya SCT.",
+      en: "Rwanda: customs is run by the RRA (Rwanda Revenue Authority), VAT 18%, EAC CET. Burundi: run by the OBR (Office Burundais des Recettes), VAT ~18%. Both are landlocked \u2014 cargo arrives in transit via Dar (Central Corridor, borders Rusumo/Kabanga) or Mombasa (Northern Corridor, border Gatuna). Rwanda and Burundi are EAC members; Rwanda is also in COMESA. EAC duties are paid at the first point of entry under the SCT."
+    }
+  },
+  {
+    topic: "country-drc",
+    strong: ["dgda", "drc customs", "occ", "congo customs"],
+    keys: ["drc", "dr congo", "congo", "kinshasa", "lubumbashi", "direction generale des douanes", "office congolais de controle", "lobito", "kasumbalesa", "copperbelt", "katanga", "landlocked east", "vat drc", "tva"],
+    answer: {
+      sw: "DRC (Jamhuri ya Kidemokrasia ya Kongo): forodha husimamiwa na DGDA (Direction G\xE9n\xE9rale des Douanes et Accises), na ukaguzi wa ubora/wingi na OCC (Office Congolais de Contr\xF4le). VAT (TVA) ~16%. DRC ni kubwa na mizigo huingia kwa njia nyingi: mashariki/kusini-mashariki (Katanga/Copperbelt) kupitia Dar (Ukanda wa Kati, mpaka Kasumbalesa/Kabanga) au Mombasa; magharibi kupitia bandari za Lobito (Angola) na Matadi. DRC ni mwanachama wa SADC, COMESA na EAC.",
+      en: "DRC (Democratic Republic of Congo): customs is run by the DGDA (Direction G\xE9n\xE9rale des Douanes et Accises), with quality/quantity inspection by the OCC (Office Congolais de Contr\xF4le). VAT (TVA) ~16%. The DRC is vast and cargo enters many ways: east/south-east (Katanga/Copperbelt) via Dar (Central Corridor, borders Kasumbalesa/Kabanga) or Mombasa; west via the ports of Lobito (Angola) and Matadi. The DRC belongs to SADC, COMESA and the EAC."
+    }
+  },
+  {
+    topic: "country-south-africa",
+    strong: ["sars", "south african revenue service", "customs and excise act"],
+    keys: ["south africa", "afrika kusini", "vat 15", "vat 15%", "durban", "sacu", "ad valorem", "cape town", "richards bay", "south african vat", "rsa"],
+    answer: {
+      sw: "Afrika Kusini: forodha/kodi husimamiwa na SARS (South African Revenue Service) chini ya Customs & Excise Act. VAT ni 15%. Afrika Kusini ni kiongozi wa SACU (Common External Tariff ya pamoja na Botswana, Namibia, Lesotho, Eswatini). Bandari kuu: Durban (kubwa zaidi Afrika Kusini mwa Sahara), Cape Town, Richards Bay. Ni kitovu cha North\u2013South Corridor inayohudumia Zambia, Zimbabwe, Malawi na DRC. Pia mwanachama wa SADC.",
+      en: "South Africa: customs/tax is run by SARS (South African Revenue Service) under the Customs & Excise Act. VAT is 15%. South Africa leads SACU (a common external tariff shared with Botswana, Namibia, Lesotho, Eswatini). Main ports: Durban (sub-Saharan Africa's largest), Cape Town, Richards Bay. It anchors the North\u2013South Corridor serving Zambia, Zimbabwe, Malawi and the DRC. Also a SADC member."
+    }
+  },
+  {
+    topic: "country-nigeria",
+    strong: ["ncs", "nigeria customs service", "b'odogwu", "bodogwu", "nicis"],
+    keys: ["nigeria", "lagos", "apapa", "tin can", "vat 7.5", "vat 7.5%", "ecowas cet", "naira", "destination inspection", "nigerian vat", "west africa"],
+    answer: {
+      sw: "Nigeria: forodha husimamiwa na NCS (Nigeria Customs Service). Mfumo mpya ni B'Odogwu (unaochukua nafasi ya NICIS II). VAT ni 7.5%. Ushuru wa nje hufuata ECOWAS CET (0/5/10/20/35%). Bandari kuu: Apapa na Tin Can (Lagos). Nigeria hutumia destination inspection (badala ya pre-shipment). Ni mwanachama wa ECOWAS na AfCFTA \u2014 uchumi mkubwa zaidi Afrika Magharibi.",
+      en: "Nigeria: customs is run by the NCS (Nigeria Customs Service). The new platform is B'Odogwu (replacing NICIS II). VAT is 7.5%. External duty follows the ECOWAS CET (0/5/10/20/35%). Main ports: Apapa and Tin Can (Lagos). Nigeria uses destination inspection (rather than pre-shipment). It is an ECOWAS and AfCFTA member \u2014 West Africa's largest economy."
+    }
+  },
+  {
+    topic: "country-ghana",
+    strong: ["gra customs", "icums", "unipass ghana", "ghana revenue authority"],
+    keys: ["ghana", "tema", "takoradi", "integrated customs management system", "ecowas cet ghana", "vat ghana", "accra", "ghanaian", "west africa"],
+    answer: {
+      sw: "Ghana: forodha husimamiwa na GRA Customs Division kupitia ICUMS (Integrated Customs Management System, zamani UNIPASS). VAT pamoja na tozo zinazohusiana (NHIL, GETFund) huleta jumla ~ chini ya 20%; ushuru wa nje hufuata ECOWAS CET. Bandari kuu: Tema (karibu Accra) na Takoradi. Ghana ni mwanachama wa ECOWAS na AfCFTA, na sekretarieti ya AfCFTA ipo Accra.",
+      en: "Ghana: customs is run by the GRA Customs Division via ICUMS (Integrated Customs Management System, formerly UNIPASS). VAT plus related levies (NHIL, GETFund) total just under 20%; external duty follows the ECOWAS CET. Main ports: Tema (near Accra) and Takoradi. Ghana is an ECOWAS and AfCFTA member, and the AfCFTA secretariat is in Accra."
+    }
+  },
+  {
+    topic: "country-francophone-west",
+    strong: ["gainde", "orbus", "dgd senegal", "dgd cote d'ivoire", "douanes"],
+    keys: ["senegal", "cote d ivoire", "ivory coast", "dakar", "abidjan", "direction generale des douanes", "gainde single window", "orbus", "uemoa", "waemu", "cfa", "francophone", "vat senegal", "tva"],
+    answer: {
+      sw: "Afrika Magharibi ya Kifaransa: Senegal \u2014 forodha DGD (Direction G\xE9n\xE9rale des Douanes), single window GAINDE/Orbus, bandari ya Dakar. C\xF4te d'Ivoire \u2014 forodha DGD, bandari ya Abidjan (sehemu ya Abidjan\u2013Lagos Corridor). Zote ni wanachama wa UEMOA/WAEMU (customs union ya faranga CFA) ndani ya ECOWAS, hivyo hutumia ECOWAS CET. VAT (TVA) ~18%.",
+      en: "Francophone West Africa: Senegal \u2014 customs DGD (Direction G\xE9n\xE9rale des Douanes), single window GAINDE/Orbus, port of Dakar. C\xF4te d'Ivoire \u2014 customs DGD, port of Abidjan (part of the Abidjan\u2013Lagos Corridor). Both are UEMOA/WAEMU members (the CFA-franc customs union) within ECOWAS, so they apply the ECOWAS CET. VAT (TVA) ~18%."
+    }
+  },
+  {
+    topic: "country-egypt",
+    strong: ["eca", "egyptian customs authority", "nafeza", "aci", "advance cargo information"],
+    keys: ["egypt", "cairo", "alexandria", "port said", "suez", "nafeza single window", "advance cargo information", "vat egypt", "north africa", "comesa egypt", "egyptian"],
+    answer: {
+      sw: "Misri: forodha husimamiwa na ECA (Egyptian Customs Authority) kupitia single window ya Nafeza, ikitumia mfumo wa ACI (Advance Cargo Information) \u2014 taarifa za mzigo lazima zitumwe kabla mzigo haujafika. VAT ~14%. Bandari kuu: Alexandria, Port Said, na njia ya Suez Canal (njia muhimu ya dunia). Misri ni mwanachama wa COMESA na AfCFTA \u2014 lango la Afrika Kaskazini.",
+      en: "Egypt: customs is run by the ECA (Egyptian Customs Authority) via the Nafeza single window, using the ACI (Advance Cargo Information) system \u2014 cargo data must be filed before arrival. VAT ~14%. Main ports: Alexandria, Port Said, and the Suez Canal route (a global chokepoint). Egypt is a COMESA and AfCFTA member \u2014 North Africa's gateway."
+    }
+  },
+  {
+    topic: "country-ethiopia",
+    strong: ["ecc", "ethiopian customs commission", "esw ethiopia"],
+    keys: ["ethiopia", "addis ababa", "djibouti corridor", "djibouti-addis", "electronic single window", "landlocked ethiopia", "modjo dry port", "vat ethiopia", "horn of africa", "igad ethiopia"],
+    answer: {
+      sw: "Ethiopia: forodha husimamiwa na ECC (Ethiopian Customs Commission), ikitumia eSW (electronic Single Window). VAT 15%. Ethiopia haina bahari \u2014 karibu mizigo yote hupita Djibouti\u2013Addis Corridor (bandari ya Djibouti \u2192 Modjo dry port \u2192 Addis Ababa) kwa reli ya kisasa na barabara. Ni mwanachama wa IGAD, COMESA na AfCFTA.",
+      en: "Ethiopia: customs is run by the ECC (Ethiopian Customs Commission), using an eSW (electronic Single Window). VAT 15%. Ethiopia is landlocked \u2014 almost all cargo moves on the Djibouti\u2013Addis Corridor (port of Djibouti \u2192 Modjo dry port \u2192 Addis Ababa) by modern rail and road. It belongs to IGAD, COMESA and AfCFTA."
+    }
+  },
+  {
+    topic: "country-southern-customs",
+    strong: ["zra", "zimra", "agt angola", "burs", "zambia revenue", "zimbabwe revenue"],
+    keys: ["zambia", "zimbabwe", "angola", "botswana", "namibia", "mozambique", "asycudaworld", "vat zambia", "vat zimbabwe", "lobito", "beira", "nacala", "walvis bay", "lusaka", "harare", "luanda", "gaborone", "single window mozambique"],
+    answer: {
+      sw: "Kusini mwa Afrika (forodha): Zambia \u2014 ZRA (Zambia Revenue Authority), ASYCUDAWorld, VAT 16%, isiyo na bahari (hutumia Dar/TAZARA, North\u2013South, Beira au Lobito). Zimbabwe \u2014 ZIMRA, VAT 15%. Angola \u2014 AGT (Administra\xE7\xE3o Geral Tribut\xE1ria), bandari ya Lobito/Luanda. Botswana \u2014 BURS (sehemu ya SACU). Namibia \u2014 bandari ya Walvis Bay (Trans-Kalahari/Trans-Caprivi). Msumbiji \u2014 single window, bandari za Beira, Nacala na Maputo. Wengi ni wanachama wa SADC; baadhi COMESA.",
+      en: "Southern Africa (customs): Zambia \u2014 ZRA (Zambia Revenue Authority), ASYCUDAWorld, VAT 16%, landlocked (uses Dar/TAZARA, North\u2013South, Beira or Lobito). Zimbabwe \u2014 ZIMRA, VAT 15%. Angola \u2014 AGT (Administra\xE7\xE3o Geral Tribut\xE1ria), ports of Lobito/Luanda. Botswana \u2014 BURS (part of SACU). Namibia \u2014 port of Walvis Bay (Trans-Kalahari/Trans-Caprivi). Mozambique \u2014 single window, ports of Beira, Nacala and Maputo. Most are SADC members; some also COMESA."
+    }
+  },
+  {
+    topic: "country-maghreb",
+    strong: ["adii", "portnet", "douane morocco", "tunisia customs"],
+    keys: ["morocco", "tunisia", "casablanca", "tangier med", "tanger med", "administration des douanes", "portnet single window", "vat morocco", "tva", "maghreb customs", "north africa", "tunis"],
+    answer: {
+      sw: "Maghreb (Afrika Kaskazini): Morocco \u2014 forodha ADII (Administration des Douanes et Imp\xF4ts Indirects), single window PortNet, bandari ya Tanger Med (mojawapo kubwa zaidi Afrika/Mediterania) na Casablanca; VAT (TVA) ~20%. Tunisia \u2014 forodha (Douane Tunisienne), bandari ya Rad\xE8s/Tunis, single window. Zote ni wanachama wa UMA/AMU; Morocco ameomba kujiunga ECOWAS na ni sehemu ya AfCFTA.",
+      en: "Maghreb (North Africa): Morocco \u2014 customs ADII (Administration des Douanes et Imp\xF4ts Indirects), the PortNet single window, ports of Tanger Med (one of Africa/the Mediterranean's largest) and Casablanca; VAT (TVA) ~20%. Tunisia \u2014 customs (Douane Tunisienne), port of Rad\xE8s/Tunis, a single window. Both belong to UMA/AMU; Morocco has applied to ECOWAS and is part of AfCFTA."
+    }
+  },
+  {
+    topic: "africa-asycuda",
+    strong: ["asycuda", "asycudaworld", "unctad customs"],
+    keys: ["automated system for customs data", "common customs platform", "single window", "shared system", "many african countries", "uncTad", "customs software", "declaration system"],
+    answer: {
+      sw: "ASYCUDA (Automated System for Customs Data), na toleo lake la kisasa ASYCUDAWorld, ni mfumo wa forodha wa kielektroniki uliotengenezwa na UNCTAD na unaotumika na nchi nyingi za Afrika (Uganda, Zambia, Rwanda, Msumbiji, n.k.) kwa kuwasilisha matamko, kukadiria kodi, risk management na single window. Ni 'lingua franca' ya forodha Afrika \u2014 ingawa baadhi ya nchi zina mifumo yao (TANCIS Tanzania, iCMS Kenya, B'Odogwu Nigeria, ICUMS Ghana).",
+      en: "ASYCUDA (Automated System for Customs Data), and its modern release ASYCUDAWorld, is UNCTAD's electronic customs platform used by many African countries (Uganda, Zambia, Rwanda, Mozambique, etc.) for lodging declarations, assessing duty, risk management and single windows. It is the customs 'lingua franca' of Africa \u2014 though some countries run their own systems (Tanzania's TANCIS, Kenya's iCMS, Nigeria's B'Odogwu, Ghana's ICUMS)."
+    }
+  },
+  // =========================================================================
+  // PAN-AFRICAN — PORTS & CORRIDORS
+  // =========================================================================
+  {
+    topic: "corridor-northern",
+    strong: ["northern corridor", "mombasa", "ukanda wa kaskazini"],
+    keys: ["kenya port", "kpa", "kenya ports authority", "nairobi icd", "naivasha", "uganda", "rwanda", "south sudan", "eastern drc", "malaba", "busia", "sgr kenya", "mombasa vs dar"],
+    answer: {
+      sw: "Ukanda wa Kaskazini (Northern Corridor) unaanzia bandari ya Mombasa (Kenya, inayoendeshwa na Kenya Ports Authority/KPA) kwenda nchi zisizo na bahari: Uganda, Rwanda, South Sudan na DRC mashariki, kupitia Nairobi/Naivasha ICD na SGR ya Kenya, mipaka ya Malaba/Busia. Mombasa hushindana na Dar (Ukanda wa Kati) kwa mizigo ya Uganda, Rwanda na DRC \u2014 wateja huchagua kwa umbali, gharama, msongamano na muda wa transit.",
+      en: "The Northern Corridor starts at the port of Mombasa (Kenya, run by the Kenya Ports Authority/KPA) serving landlocked Uganda, Rwanda, South Sudan and eastern DRC, via the Nairobi/Naivasha ICD and Kenya's SGR, crossing at Malaba/Busia. Mombasa competes with Dar (Central Corridor) for Uganda, Rwanda and DRC traffic \u2014 shippers choose on distance, cost, congestion and transit time."
+    }
+  },
+  {
+    topic: "corridor-southern",
+    strong: ["lobito corridor", "north-south corridor", "maputo corridor", "beira corridor", "nacala corridor", "walvis bay", "trans-kalahari", "trans-caprivi"],
+    keys: ["durban", "lobito", "angola", "benguela railway", "zambia", "zimbabwe", "drc copperbelt", "maputo", "beira", "nacala", "mozambique", "namibia", "botswana", "malawi", "southern corridor", "trans kalahari", "trans caprivi"],
+    answer: {
+      sw: "Korido za Kusini mwa Afrika: North\u2013South Corridor (Durban\u2192Zimbabwe\u2192Zambia\u2192DRC) ni njia yenye shughuli nyingi zaidi SADC. Lobito Corridor (bandari ya Lobito, Angola\u2192DRC/Zambia kupitia reli ya Benguela) ni njia mpya muhimu ya madini ya Copperbelt. Maputo Corridor (Maputo\u2192Afrika Kusini/eSwatini). Beira & Nacala Corridors (Msumbiji\u2192Malawi, Zambia, Zimbabwe). Walvis Bay (Namibia) kupitia Trans-Kalahari (\u2192Botswana/Gauteng) na Trans-Caprivi/Trans-Zambezi (\u2192Zambia/DRC). Hizi humpa mteja chaguo dhidi ya Dar/Mombasa.",
+      en: "Southern African corridors: the North\u2013South Corridor (Durban\u2192Zimbabwe\u2192Zambia\u2192DRC) is SADC's busiest route. The Lobito Corridor (port of Lobito, Angola\u2192DRC/Zambia via the Benguela railway) is a major new artery for Copperbelt minerals. The Maputo Corridor (Maputo\u2192South Africa/eSwatini). The Beira & Nacala Corridors (Mozambique\u2192Malawi, Zambia, Zimbabwe). Walvis Bay (Namibia) via Trans-Kalahari (\u2192Botswana/Gauteng) and Trans-Caprivi/Trans-Zambezi (\u2192Zambia/DRC). These give shippers alternatives to Dar/Mombasa."
+    }
+  },
+  {
+    topic: "corridor-west-horn",
+    strong: ["abidjan-lagos corridor", "abidjan lagos", "djibouti-addis", "djibouti corridor", "berbera"],
+    keys: ["tema", "apapa", "lagos", "cotonou", "dakar", "lome", "djibouti", "berbera", "somaliland", "ethiopia", "niger", "mali", "burkina faso", "chad", "landlocked west", "horn of africa", "west africa ports"],
+    answer: {
+      sw: "Afrika Magharibi & Pembe ya Afrika: Abidjan\u2013Lagos Corridor unaunganisha bandari za Abidjan, Tema, Lom\xE9, Cotonou, Lagos (Apapa) \u2014 uti wa mgongo wa biashara ya pwani ya ECOWAS. Bandari hizi + Dakar hupeleka mizigo kwa nchi zisizo na bahari: Mali, Burkina Faso, Niger, Chad (kupitia Cotonou/Lom\xE9/Apapa). Pembe ya Afrika: Djibouti\u2013Addis Corridor (Djibouti\u2192Ethiopia) na Berbera (Somaliland) kama mbadala kwa Ethiopia. Kila korido huhudumia nchi zisizo na bahari zinazoizunguka.",
+      en: "West Africa & the Horn: the Abidjan\u2013Lagos Corridor links the ports of Abidjan, Tema, Lom\xE9, Cotonou and Lagos (Apapa) \u2014 the spine of ECOWAS coastal trade. These plus Dakar feed landlocked Mali, Burkina Faso, Niger and Chad (via Cotonou/Lom\xE9/Apapa). Horn of Africa: the Djibouti\u2013Addis Corridor (Djibouti\u2192Ethiopia) and Berbera (Somaliland) as an alternative for Ethiopia. Each corridor serves the landlocked countries around it."
+    }
+  },
+  // =========================================================================
+  // CROSS-CUTTING LOGISTICS LAW / INSTRUMENTS
+  // =========================================================================
+  {
+    topic: "law-rules-of-origin",
+    strong: ["rules of origin", "certificate of origin", "eur.1", "eur1", "kanuni za asili"],
+    keys: ["coo", "preferential origin", "wholly obtained", "value addition", "tariff shift", "eac coo", "sadc coo", "comesa coo", "afcfta coo", "cheti cha asili", "asili ya bidhaa", "origin criteria", "proof of origin"],
+    answer: {
+      sw: "Rules of origin (kanuni za asili) huamua 'utaifa wa kiuchumi' wa bidhaa ili kupata ushuru wa upendeleo ndani ya bloc. Vigezo: 'wholly obtained' (imezalishwa kabisa nchini) au value-addition/tariff-shift ya kutosha. Uthibitisho ni Certificate of Origin: EUR.1 (biashara na EU/EFTA), na CoO za EAC, SADC, COMESA na AfCFTA kwa biashara ndani ya Afrika. Bila CoO sahihi, bidhaa hulipia ushuru kamili (MFN) badala ya 0% ya upendeleo.",
+      en: "Rules of origin determine a good's 'economic nationality' to qualify for preferential duty inside a bloc. Criteria: 'wholly obtained' (entirely produced in-country) or sufficient value-addition/tariff-shift. Proof is a Certificate of Origin: EUR.1 (trade with the EU/EFTA), and the EAC, SADC, COMESA and AfCFTA CoOs for intra-African trade. Without a valid CoO, goods pay full (MFN) duty instead of the 0% preference."
+    }
+  },
+  {
+    topic: "law-transit-guarantee",
+    strong: ["tir", "rctg", "regional customs transit guarantee", "transit bond", "carnet"],
+    keys: ["tir carnet", "comesa carnet", "single bond", "transit guarantee", "cross border transit", "ects", "electronic cargo tracking", "dhamana ya transit", "one bond", "regional bond"],
+    answer: {
+      sw: "Dhamana ya transit ya kikanda: badala ya kuweka bondi mpya kila mpaka, mfumo wa RCTG (Regional Customs Transit Guarantee \u2014 COMESA/EAC) hutumia dhamana moja inayotambulika nchi nzima njiani, sawa na TIR Carnet ya kimataifa. Pamoja na ECTS (Electronic Cargo Tracking System), forodha hufuatilia mzigo wa transit ukiwa njiani. Hii hupunguza gharama, ucheleweshaji na ulanguzi kwa nchi zisizo na bahari.",
+      en: "Regional transit guarantee: instead of posting a fresh bond at each border, the RCTG (Regional Customs Transit Guarantee \u2014 COMESA/EAC) uses one guarantee honoured along the whole route, much like the international TIR Carnet. Combined with an ECTS (Electronic Cargo Tracking System), customs monitors transit cargo en route. This cuts costs, delays and diversion for landlocked countries."
+    }
+  },
+  {
+    topic: "law-yellow-card-insurance",
+    strong: ["yellow card", "comesa yellow card", "third party insurance", "motor insurance"],
+    keys: ["bima ya gari", "third-party", "cross border insurance", "regional insurance", "accident liability", "bima ya mpakani", "vehicle insurance", "comesa insurance"],
+    answer: {
+      sw: "COMESA Yellow Card ni mpango wa bima ya gari (third-party / liability) inayotambulika mipakani ya nchi wanachama wa COMESA. Dereva mmoja anakuwa na karatasi ya njano (Yellow Card) inayofidia ajali na madhara kwa watu wa tatu katika nchi zote zinazoshiriki \u2014 bila kununua bima mpya kila mpaka. Ni muhimu kwa malori ya transit yanayovuka nchi kadhaa. (Tanzania ipo SADC/EAC; kwa korido za COMESA, Yellow Card hutumika upande wa nchi wanachama.)",
+      en: "The COMESA Yellow Card is a motor third-party/liability insurance scheme recognised across COMESA member borders. A driver carries one Yellow Card that covers accidents and third-party harm in all participating countries \u2014 without buying fresh insurance at each border. It is vital for transit trucks crossing several countries. (Tanzania is in SADC/EAC; on COMESA corridors the Yellow Card applies on member-state legs.)"
+    }
+  },
+  {
+    topic: "law-dangerous-goods",
+    strong: ["dangerous goods", "imdg", "adr", "bidhaa hatari", "hazmat"],
+    keys: ["hazardous", "imo class", "un number", "msds", "sds", "flammable", "corrosive", "explosives", "lithium battery", "placard", "dgr iata", "kemikali hatari", "spill"],
+    answer: {
+      sw: "Bidhaa hatari (dangerous goods) husafirishwa chini ya kanuni za kimataifa: IMDG Code (baharini), ADR (barabarani), na IATA DGR (angani). Bidhaa huainishwa kwa IMO/UN class (mfano flammable, corrosive, explosive, lithium batteries) na UN number, na lazima ziwe na packaging sahihi, lebo/placards, na nyaraka (SDS/MSDS, Dangerous Goods Declaration). Tanzania pia inahusisha Jeshi la Zimamoto na vibali maalum kwa baadhi ya kemikali.",
+      en: "Dangerous goods move under international rules: the IMDG Code (sea), ADR (road), and IATA DGR (air). Goods are classified by IMO/UN class (e.g. flammable, corrosive, explosive, lithium batteries) and a UN number, and must have correct packaging, labels/placards, and documents (SDS/MSDS, Dangerous Goods Declaration). In Tanzania the Fire & Rescue Force and special permits also apply to certain chemicals."
+    }
+  },
+  {
+    topic: "law-sps-phytosanitary",
+    strong: ["phytosanitary", "sps", "sanitary", "spitosanitary", "afya ya mimea"],
+    keys: ["plant health", "fumigation", "ufukizaji", "pest", "wadudu", "import permit plant", "ippc", " phytosanitary certificate", "food safety", "veterinary certificate", "tphpa", "produce export", "agricultural"],
+    answer: {
+      sw: "SPS (Sanitary & Phytosanitary) ni hatua za usalama wa afya ya binadamu, wanyama na mimea kwenye biashara. Mazao ya kilimo yanayouzwa nje/kuingizwa mara nyingi yanahitaji Phytosanitary Certificate (chini ya IPPC) inayothibitisha hayana wadudu/magonjwa, na pengine ufukizaji (fumigation). Bidhaa za wanyama zinahitaji veterinary/health certificate. Tanzania: TPHPA hutoa cheti cha phytosanitary; nchi nyingi za Afrika zina mamlaka sawa. Bila vyeti hivi, mzigo huzuiwa au kuharibiwa.",
+      en: "SPS (Sanitary & Phytosanitary) measures protect human, animal and plant health in trade. Agricultural produce exported/imported usually needs a Phytosanitary Certificate (under the IPPC) attesting it is pest/disease-free, and sometimes fumigation. Animal products need a veterinary/health certificate. In Tanzania the TPHPA issues the phytosanitary certificate; most African countries have an equivalent authority. Without these, cargo is held or destroyed."
+    }
+  },
+  {
+    topic: "law-inspection",
+    strong: ["pvoc", "destination inspection", "pre-shipment inspection", "psi", "conformity assessment"],
+    keys: ["certificate of conformity", "coc", "soncap nigeria", "pvoc kenya", "pca ghana", "inspection scheme", "ukaguzi wa ubora", "intertek", "sgs", "bureau veritas", "standards mark", "import inspection"],
+    answer: {
+      sw: "Ukaguzi wa kufuata viwango (conformity): nchi nyingi za Afrika zinataka bidhaa zilizodhibitiwa kukaguliwa kabla/zikifika ili kupata Certificate of Conformity (CoC). Mifano: PVoC (Tanzania TBS na Kenya KEBS), SONCAP (Nigeria), na programu za Ghana/Uganda \u2014 mara nyingi zinaendeshwa na makampuni kama SGS, Intertek au Bureau Veritas nchi ya asili (pre-shipment) au baadhi hutumia destination inspection. Bila CoC, bidhaa huzuiwa au hutozwa ada za ukaguzi wa ziada bandarini.",
+      en: "Conformity inspection: many African countries require regulated goods to be checked before/on arrival to obtain a Certificate of Conformity (CoC). Examples: PVoC (Tanzania's TBS and Kenya's KEBS), SONCAP (Nigeria), and Ghana/Uganda schemes \u2014 often run by firms like SGS, Intertek or Bureau Veritas in the country of origin (pre-shipment), while some use destination inspection. Without a CoC, goods are held or hit with extra inspection fees at the port."
+    }
+  },
+  // =========================================================================
+  // PAN-AFRICAN GENERAL OVERVIEW
+  // =========================================================================
+  {
+    topic: "africa-overview",
+    strong: ["africa logistics", "pan-african", "all of africa", "afrika nzima", "logistics across africa"],
+    keys: ["which authority", "which port", "trade across africa", "continent", "biashara afrika", "cross-continent", "any country africa", "african trade", "import to africa", "export from africa"],
+    answer: {
+      sw: "Rubani anafahamu usafirishaji kote Afrika: jumuiya za kibiashara (EAC, SADC, ECOWAS, COMESA, CEMAC/ECCAS, UMA, IGAD, CEN-SAD, SACU, AfCFTA + WTO/WCO); mamlaka za forodha za nchi (TRA, KRA, URA, RRA, OBR, DGDA, SARS, NCS, GRA, DGD, ECA, ECC, ZRA, ZIMRA, AGT, ADII, BURS); mifumo (TANCIS, iCMS, ASYCUDA, B'Odogwu, ICUMS, Nafeza, PortNet); bandari na korido (Mombasa/Northern, Dar/Central, Durban/North\u2013South, Lobito, Maputo, Beira, Nacala, Walvis Bay, Abidjan\u2013Lagos, Djibouti\u2013Addis); sheria (rules of origin, RCTG/TIR, COMESA Yellow Card, axle-load, IMDG/ADR, SPS, PVoC, Incoterms 2020); na hesabu (duty+VAT kwa nchi, CBM, volumetric). Niulize nchi au mada yoyote.",
+      en: "Rubani covers logistics across all of Africa: trade blocs (EAC, SADC, ECOWAS, COMESA, CEMAC/ECCAS, UMA, IGAD, CEN-SAD, SACU, AfCFTA + WTO/WCO); national customs authorities (TRA, KRA, URA, RRA, OBR, DGDA, SARS, NCS, GRA, DGD, ECA, ECC, ZRA, ZIMRA, AGT, ADII, BURS); systems (TANCIS, iCMS, ASYCUDA, B'Odogwu, ICUMS, Nafeza, PortNet); ports and corridors (Mombasa/Northern, Dar/Central, Durban/North\u2013South, Lobito, Maputo, Beira, Nacala, Walvis Bay, Abidjan\u2013Lagos, Djibouti\u2013Addis); laws (rules of origin, RCTG/TIR, COMESA Yellow Card, axle-load, IMDG/ADR, SPS, PVoC, Incoterms 2020); and maths (per-country duty+VAT, CBM, volumetric). Ask me about any country or topic."
+    }
+  }
+];
+var STEPS_BY_TOPIC = {
+  "playbook-import-container": {
+    sw: [
+      "Sajili biashara BRELA na upate TIN (TRA).",
+      "Pata pro-forma invoice na kubaliana Incoterm na muuzaji.",
+      "Hakikisha vibali (TBS/PVoC, TMDA, n.k.) kama bidhaa zinahitaji.",
+      "Bidhaa zinasafirishwa; unapata Bill of Lading.",
+      "Mteue wakala wa TAFFA awasilishe TANSAD kwenye TANCIS.",
+      "Lipa ushuru/VAT kupitia control number ya GePG.",
+      "TPA/TICTS wanatoa kontena baada ya release order.",
+      "Panga usafiri (SGR/lori) hadi ghala; rudisha kontena tupu kuepuka detention."
+    ],
+    en: [
+      "Register the business with BRELA and get a TIN (TRA).",
+      "Obtain a pro-forma invoice and agree an Incoterm with the seller.",
+      "Secure permits (TBS/PVoC, TMDA, etc.) if the goods are regulated.",
+      "Goods ship; you receive the Bill of Lading.",
+      "Appoint a TAFFA agent to lodge the TANSAD in TANCIS.",
+      "Pay duty/VAT via the GePG control number.",
+      "TPA/TICTS release the container after the release order.",
+      "Arrange haulage (SGR/truck) to your warehouse; return the empty to avoid detention."
+    ]
+  },
+  "playbook-clear-customs": {
+    sw: [
+      "Kusanya nyaraka \u2014 Bill of Lading, Invoice, Packing List, Certificate of Origin, vibali.",
+      "Wakala wa TAFFA anawasilisha tamko (TANSAD) kwenye TANCIS na kuainisha HS code.",
+      "TANCIS inakadiria kodi na kupanga channel (kijani/njano/nyekundu).",
+      "Lipa kupitia GePG (control number).",
+      "Kama ni nyekundu, mzigo unakaguliwa kimwili.",
+      "Release order inatolewa.",
+      "Lipa ada za TPA/shipping line, kisha chukua mzigo."
+    ],
+    en: [
+      "Gather docs \u2014 Bill of Lading, Invoice, Packing List, Certificate of Origin, permits.",
+      "A TAFFA agent lodges the declaration (TANSAD) in TANCIS and classifies the HS code.",
+      "TANCIS assesses duty and assigns a channel (green/yellow/red).",
+      "Pay via GePG (control number).",
+      "If red, the cargo is physically examined.",
+      "A release order is issued.",
+      "Pay TPA/shipping-line charges, then take delivery."
+    ]
+  },
+  "playbook-sgr-cargo": {
+    sw: [
+      "Kamilisha forodha bandari ya Dar (au tumia transit kwenda ICD).",
+      "Kontena linahamishwa kutoka TICTS hadi kituo cha reli/ICD.",
+      "Weka booking ya mzigo na TRC kwa treni ya mizigo.",
+      "Kontena linapakiwa kwenye behewa; treni inaelekea Morogoro/Dodoma/Makutupora kuelekea Mwanza.",
+      "Kufika ICD ya bara, kontena linatolewa na kupelekwa kwa lori hadi mlangoni."
+    ],
+    en: [
+      "Clear customs at Dar port (or move under transit to an ICD).",
+      "The container transfers from TICTS to the rail/ICD terminal.",
+      "Place a freight booking with the TRC.",
+      "The container is loaded onto a wagon; the train runs to Morogoro/Dodoma/Makutupora toward Mwanza.",
+      "At the inland ICD the container is offloaded and trucked to the door."
+    ]
+  },
+  "playbook-transit": {
+    sw: [
+      "Mzigo unafika Dar kama transit (hauipiliwi kodi ya Tanzania).",
+      "Wakala anawasilisha transit declaration (T1) kwenye TANCIS chini ya bondi.",
+      "Mzigo unasafirishwa kwa SGR/TAZARA/lori chini ya ufuatiliaji (ECTS) kupitia Ukanda wa Kati.",
+      "Mpakani (Tunduma/Kasumbalesa/Kabanga) mzigo unathibitishwa kuondoka.",
+      "Bondi inafungwa (acquittal); forodha halisi inalipwa nchi ya mwisho."
+    ],
+    en: [
+      "Cargo arrives at Dar as transit (no Tanzanian duty).",
+      "The agent lodges a transit declaration (T1) in TANCIS under a customs bond.",
+      "It moves by SGR/TAZARA/truck under tracking (ECTS) via the Central Corridor.",
+      "At the border (Tunduma/Kasumbalesa/Kabanga) exit is confirmed.",
+      "The bond is acquitted; actual duty is paid in the destination country."
+    ]
+  },
+  "playbook-become-agent": {
+    sw: [
+      "Sajili kampuni BRELA na upate TIN.",
+      "Jiunge/ufuzu na TAFFA na ufaulu mafunzo/mtihani wa weledi.",
+      "Pata leseni ya TASAC kwa huduma za freight forwarding (na za baharini).",
+      "Hakikisha una dhamana/bond ya forodha inayohitajika.",
+      "Pata akaunti ya kuingia TANCIS ili kuwasilisha matamko kwa niaba ya wateja."
+    ],
+    en: [
+      "Register a company with BRELA and get a TIN.",
+      "Join/qualify through TAFFA and pass the competence training/exam.",
+      "Obtain a TASAC licence for freight-forwarding (and maritime) services.",
+      "Hold the required customs bond/guarantee.",
+      "Get a TANCIS login to lodge declarations on clients' behalf."
+    ]
+  },
+  "playbook-export-docs": {
+    sw: [
+      "Andaa Commercial Invoice na Packing List.",
+      "Wasilisha export declaration kwenye TANCIS (kupitia wakala wa TAFFA).",
+      "Pata Certificate of Origin (EAC/SADC/AfCFTA kwa upendeleo wa ushuru).",
+      "Pata Bill of Lading / Airway Bill.",
+      "Pata vyeti maalum kulingana na bidhaa \u2014 phytosanitary (TPHPA), ubora (TBS), au vibali vya madini/mifugo."
+    ],
+    en: [
+      "Prepare the Commercial Invoice and Packing List.",
+      "Lodge an export declaration in TANCIS (via a TAFFA agent).",
+      "Obtain a Certificate of Origin (EAC/SADC/AfCFTA for tariff preference).",
+      "Obtain the Bill of Lading / Airway Bill.",
+      "Get commodity-specific certificates \u2014 phytosanitary (TPHPA), quality (TBS), or mineral/livestock permits."
+    ]
+  }
+};
+var SOURCES_BY_TOPIC = {
+  customs: [{ name: "TRA" }, { name: "TANCIS" }, { name: "TAFFA" }, { name: "TASAC" }],
+  "customs-docs": [{ name: "TANCIS" }, { name: "TAFFA" }],
+  "customs-regimes": [{ name: "TANCIS" }, { name: "EAC" }],
+  "agency-tra": [{ name: "TRA", note: "Tanzania Revenue Authority" }, { name: "TANCIS" }, { name: "GePG" }],
+  "agency-tancis": [{ name: "TANCIS" }, { name: "TRA" }, { name: "GePG" }, { name: "TAFFA" }],
+  "agency-tasac": [{ name: "TASAC", note: "Tanzania Shipping Agents Corporation" }],
+  "agency-tpa": [{ name: "TPA", note: "Tanzania Ports Authority" }, { name: "TICTS" }],
+  "agency-sgr": [{ name: "TRC", note: "Tanzania Railway Corporation" }],
+  "agency-tazara": [{ name: "TAZARA" }],
+  "agency-latra": [{ name: "LATRA" }],
+  "agency-tanroads": [{ name: "TANROADS" }, { name: "EAC Vehicle Load Control Act" }],
+  "agency-tbs": [{ name: "TBS", note: "Tanzania Bureau of Standards" }, { name: "PVoC" }],
+  "agency-permits": [{ name: "TMDA" }, { name: "TPHPA" }, { name: "TBS" }, { name: "NEMC" }],
+  "agency-tcaa": [{ name: "TCAA", note: "Tanzania Civil Aviation Authority" }],
+  "agency-registration": [{ name: "BRELA" }, { name: "TRA" }, { name: "NIDA" }, { name: "eGA" }],
+  "agency-payments": [{ name: "GePG" }, { name: "Bank of Tanzania" }, { name: "TIPS" }],
+  "framework-eac": [{ name: "EAC", note: "Customs Union / SCT / CET" }],
+  "framework-regional-blocs": [{ name: "COMESA" }, { name: "SADC" }, { name: "AfCFTA" }],
+  "framework-wto-wco": [{ name: "WTO", note: "Trade Facilitation Agreement" }, { name: "WCO", note: "Harmonized System" }],
+  "framework-aeo": [{ name: "TRA" }, { name: "EAC", note: "AEO programme" }],
+  "africa-afcfta": [{ name: "AfCFTA" }, { name: "African Union" }],
+  "africa-sadc": [{ name: "SADC" }],
+  "africa-comesa": [{ name: "COMESA" }],
+  "africa-asycuda": [{ name: "UNCTAD", note: "ASYCUDA / ASYCUDAWorld" }],
+  "law-rules-of-origin": [{ name: "EAC" }, { name: "SADC" }, { name: "COMESA" }, { name: "AfCFTA" }],
+  "law-transit-guarantee": [{ name: "RCTG", note: "COMESA/EAC" }, { name: "TIR" }],
+  "law-yellow-card-insurance": [{ name: "COMESA", note: "Yellow Card scheme" }],
+  "law-dangerous-goods": [{ name: "IMDG Code" }, { name: "ADR" }, { name: "IATA DGR" }],
+  "law-sps-phytosanitary": [{ name: "IPPC" }, { name: "TPHPA" }],
+  "law-inspection": [{ name: "PVoC" }, { name: "TBS" }, { name: "SGS / Intertek / Bureau Veritas" }],
+  "country-kenya": [{ name: "KRA" }, { name: "iCMS" }],
+  "country-uganda": [{ name: "URA" }, { name: "ASYCUDAWorld" }],
+  "country-south-africa": [{ name: "SARS" }, { name: "SACU" }],
+  "country-nigeria": [{ name: "NCS" }, { name: "B'Odogwu" }],
+  "africa-sacu": [{ name: "SACU" }, { name: "SARS" }]
+};
+var ACTIONS_BY_TOPIC = {
+  customs: [
+    { kind: "navigate", label: { sw: "Fungua Forodha", en: "Open Customs" }, payload: { path: "/customs" } },
+    { kind: "estimateDuty", label: { sw: "Kadiria ushuru", en: "Estimate duty" } }
+  ],
+  "customs-docs": [{ kind: "navigate", label: { sw: "Fungua Forodha", en: "Open Customs" }, payload: { path: "/customs" } }],
+  "agency-tra": [{ kind: "estimateDuty", label: { sw: "Kadiria ushuru", en: "Estimate duty" } }],
+  "agency-tancis": [
+    { kind: "openForm", label: { sw: "Jaza TANSAD", en: "Fill TANSAD" }, payload: { templateId: "tansad-sad" } }
+  ],
+  "calc-duty": [{ kind: "navigate", label: { sw: "Nenda Fedha", en: "Open Finance" }, payload: { path: "/finance" } }],
+  "calc-landed-cost": [{ kind: "navigate", label: { sw: "Nenda Fedha", en: "Open Finance" }, payload: { path: "/finance" } }],
+  pricing: [{ kind: "navigate", label: { sw: "Pata quote", en: "Get a quote" }, payload: { path: "/finance" } }],
+  "cargolink-track": [{ kind: "track", label: { sw: "Fuatilia mzigo", en: "Track shipment" } }],
+  "cargolink-book": [{ kind: "navigate", label: { sw: "Weka mzigo", en: "Book shipment" }, payload: { path: "/marketplace" } }],
+  "cargolink-partner": [
+    { kind: "navigate", label: { sw: "Jiunge soko", en: "Join marketplace" }, payload: { path: "/marketplace" } }
+  ],
+  "agency-payments": [{ kind: "navigate", label: { sw: "Nenda Pochi", en: "Open Wallet" }, payload: { path: "/wallet" } }],
+  "playbook-import-container": [
+    { kind: "navigate", label: { sw: "Fungua Forodha", en: "Open Customs" }, payload: { path: "/customs" } },
+    { kind: "estimateDuty", label: { sw: "Kadiria ushuru", en: "Estimate duty" } }
+  ],
+  "playbook-clear-customs": [
+    { kind: "openForm", label: { sw: "Jaza TANSAD", en: "Fill TANSAD" }, payload: { templateId: "tansad-sad" } }
+  ],
+  "playbook-export-docs": [
+    { kind: "navigate", label: { sw: "Fungua fomu", en: "Open forms" }, payload: { path: "/forms" } }
+  ],
+  "playbook-become-agent": [
+    { kind: "navigate", label: { sw: "Jiunge soko", en: "Join marketplace" }, payload: { path: "/marketplace" } }
+  ]
+};
+function enrich(answer) {
+  const steps = STEPS_BY_TOPIC[answer.topic];
+  const sources = SOURCES_BY_TOPIC[answer.topic];
+  const actions = ACTIONS_BY_TOPIC[answer.topic];
+  if (steps) answer.steps = steps;
+  if (sources) answer.sources = sources;
+  if (actions) answer.actions = actions;
+  return answer;
+}
+function pickNumbers(q) {
+  const m = normalize3(q).match(/\d+(?:\.\d+)?/g);
+  return m ? m.map(Number) : [];
+}
+var COUNTRY_VAT = [
+  { name: "Tanzania", rate: 18, aliases: ["tanzania", "tra", "tanzanian", "tz"] },
+  { name: "Kenya", rate: 16, aliases: ["kenya", "kra", "kenyan", "mombasa"] },
+  { name: "Uganda", rate: 18, aliases: ["uganda", "ura", "ugandan"] },
+  { name: "Rwanda", rate: 18, aliases: ["rwanda", "rra", "rwandan"] },
+  { name: "Burundi", rate: 18, aliases: ["burundi", "obr"] },
+  { name: "DRC", rate: 16, aliases: ["drc", "dr congo", "dgda", "congo"] },
+  { name: "South Africa", rate: 15, aliases: ["south africa", "sars", "afrika kusini", "rsa"] },
+  { name: "Nigeria", rate: 7.5, aliases: ["nigeria", "ncs", "nigerian", "lagos"] },
+  { name: "Ghana", rate: 15, aliases: ["ghana", "gra", "ghanaian", "tema"] },
+  { name: "Egypt", rate: 14, aliases: ["egypt", "eca", "egyptian", "nafeza"] },
+  { name: "Ethiopia", rate: 15, aliases: ["ethiopia", "ecc", "ethiopian", "addis"] },
+  { name: "Zambia", rate: 16, aliases: ["zambia", "zra", "zambian", "lusaka"] },
+  { name: "Zimbabwe", rate: 15, aliases: ["zimbabwe", "zimra", "harare"] },
+  { name: "Morocco", rate: 20, aliases: ["morocco", "adii", "moroccan", "casablanca"] },
+  { name: "Senegal", rate: 18, aliases: ["senegal", "dakar", "senegalese"] },
+  { name: "C\xF4te d'Ivoire", rate: 18, aliases: ["cote d ivoire", "ivory coast", "abidjan"] }
+];
+var COUNTRY_STRONG_ALIAS = {
+  Tanzania: "tra",
+  Kenya: "kra",
+  Uganda: "ura",
+  Rwanda: "rra",
+  Burundi: "obr",
+  DRC: "dgda",
+  "South Africa": "sars",
+  Nigeria: "ncs",
+  Ghana: "gra",
+  Egypt: "eca",
+  Ethiopia: "ecc",
+  Zambia: "zra",
+  Zimbabwe: "zimra"
+};
+function pickCountryVat(qNorm) {
+  const toks = new Set(qNorm.split(" ").filter(Boolean));
+  for (const c of COUNTRY_VAT) {
+    for (const a of c.aliases) {
+      if (a.length <= 4) {
+        if (toks.has(a)) return { name: c.name, rate: c.rate };
+      } else if (qNorm.includes(a)) {
+        return { name: c.name, rate: c.rate };
+      }
+    }
+  }
+  return null;
+}
+var CORRIDOR_ALIASES = [
+  { name: "Central Corridor", aliases: ["central corridor", "ukanda wa kati", "dar corridor"] },
+  { name: "Northern Corridor", aliases: ["northern corridor", "ukanda wa kaskazini", "mombasa corridor"] },
+  { name: "North-South Corridor", aliases: ["north-south corridor", "north south corridor"] },
+  { name: "Lobito Corridor", aliases: ["lobito corridor", "lobito"] },
+  { name: "Maputo Corridor", aliases: ["maputo corridor"] },
+  { name: "Beira Corridor", aliases: ["beira corridor", "beira"] },
+  { name: "Nacala Corridor", aliases: ["nacala corridor", "nacala"] },
+  { name: "Djibouti-Addis Corridor", aliases: ["djibouti-addis", "djibouti corridor", "djibouti addis"] },
+  { name: "Abidjan-Lagos Corridor", aliases: ["abidjan-lagos", "abidjan lagos"] }
+];
+var MODE_ALIASES = [
+  { name: "sea", aliases: ["sea", "ocean", "meli", "baharini", "vessel", "maritime"] },
+  { name: "air", aliases: ["air", "ndege", "airfreight", "air cargo", "anga"] },
+  { name: "rail", aliases: ["rail", "sgr", "reli", "train", "treni", "tazara"] },
+  { name: "road", aliases: ["road", "truck", "lori", "barabara", "trucking", "haulage"] }
+];
+function extractEntities(qNorm) {
+  const e = {};
+  const country = pickCountryVat(qNorm);
+  if (country) e.country = country.name;
+  for (const c of CORRIDOR_ALIASES) {
+    if (c.aliases.some((a) => qNorm.includes(a))) {
+      e.corridor = c.name;
+      break;
+    }
+  }
+  for (const m of MODE_ALIASES) {
+    if (m.aliases.some((a) => qNorm.includes(a))) {
+      e.mode = m.name;
+      break;
+    }
+  }
+  const nums = pickNumbers(qNorm);
+  if (nums.length) e.value = String(nums.reduce((a, b) => Math.max(a, b), 0));
+  return e;
+}
+function looksLikeFollowUp2(qNorm) {
+  const t = qNorm.split(" ").filter(Boolean);
+  if (t.length > 7) return false;
+  return /(there|hapo|huko|that|hiyo|hilo|hapohapo|vipi kuhusu|what about|and the|na je|je\b|its|yake)/.test(qNorm);
+}
+var HS_HINTS = [
+  { aliases: ["coffee", "kahawa"], chapter: "09", desc: { sw: "Kahawa, chai, viungo", en: "Coffee, tea, spices" } },
+  { aliases: ["tea", "chai"], chapter: "09", desc: { sw: "Chai, kahawa, viungo", en: "Tea, coffee, spices" } },
+  { aliases: ["rice", "mchele", "maize", "mahindi", "grain", "nafaka", "wheat", "ngano"], chapter: "10", desc: { sw: "Nafaka", en: "Cereals" } },
+  { aliases: ["sugar", "sukari"], chapter: "17", desc: { sw: "Sukari (mara nyingi sensitive/excisable)", en: "Sugar (often sensitive/excisable)" } },
+  { aliases: ["fertilizer", "fertiliser", "mbolea"], chapter: "31", desc: { sw: "Mbolea", en: "Fertilizers" } },
+  { aliases: ["medicine", "medicament", "pharma", "dawa"], chapter: "30", desc: { sw: "Dawa (kibali TMDA)", en: "Pharmaceuticals (TMDA permit)" } },
+  { aliases: ["plastic", "plastiki"], chapter: "39", desc: { sw: "Plastiki na bidhaa zake", en: "Plastics & articles" } },
+  { aliases: ["cement", "saruji"], chapter: "25", desc: { sw: "Saruji, chumvi, madini", en: "Cement, salt, minerals" } },
+  { aliases: ["fuel", "petrol", "diesel", "mafuta"], chapter: "27", desc: { sw: "Mafuta ya petroli (excisable)", en: "Mineral fuels (excisable)" } },
+  { aliases: ["iron", "steel", "chuma"], chapter: "72", desc: { sw: "Chuma na vyuma", en: "Iron & steel" } },
+  { aliases: ["machine", "machinery", "mashine", "engine", "injini"], chapter: "84", desc: { sw: "Mashine na vifaa vya mitambo", en: "Machinery & mechanical appliances" } },
+  { aliases: ["electronic", "electronics", "phone", "simu", "computer", "kompyuta", "tv", "luninga"], chapter: "85", desc: { sw: "Vifaa vya umeme/elektroniki", en: "Electrical/electronic equipment" } },
+  { aliases: ["vehicle", "car", "gari", "motor", "truck chassis"], chapter: "87", desc: { sw: "Magari (mara nyingi excisable)", en: "Vehicles (often excisable)" } },
+  { aliases: ["clothes", "clothing", "apparel", "nguo", "mavazi", "garment"], chapter: "61", desc: { sw: "Mavazi (yaliyofumwa)", en: "Apparel (knitted)" } },
+  { aliases: ["shoes", "footwear", "viatu"], chapter: "64", desc: { sw: "Viatu", en: "Footwear" } },
+  { aliases: ["furniture", "samani", "fanicha"], chapter: "94", desc: { sw: "Samani / fanicha", en: "Furniture" } }
+];
+function tryHsHint(qNorm) {
+  for (const h of HS_HINTS) {
+    if (h.aliases.some((a) => qNorm.includes(a))) {
+      return {
+        topic: "hs-hint",
+        data: { chapter: h.chapter, indicative: true },
+        text: {
+          sw: `Mwongozo wa HS code: bidhaa hii inaelekea kuanguka kwenye Sura ${h.chapter} ya HS (${h.desc.sw}). HII NI DALILI TU \u2014 thibitisha uainishaji kamili na TRA/TANCIS kabla ya kulipa ushuru.`,
+          en: `HS code hint: this good likely falls under HS Chapter ${h.chapter} (${h.desc.en}). INDICATIVE ONLY \u2014 confirm the full classification with TRA/TANCIS before paying duty.`
+        }
+      };
+    }
+  }
+  return null;
+}
+function toMetres(values) {
+  const looksMetres = values.every((v) => v <= 12);
+  if (looksMetres) return { metres: values, assumedCm: false };
+  return { metres: values.map((v) => v / 100), assumedCm: true };
+}
+function fmt(n, dp = 2) {
+  return Number(n.toFixed(dp)).toString();
+}
+function containerHint(cbm) {
+  if (cbm <= 28) return { code: "20ft", note: { sw: "linatosha kontena la 20ft (~28 CBM).", en: "fits a 20ft container (~28 CBM)." } };
+  if (cbm <= 58) return { code: "40ft", note: { sw: "linahitaji kontena la 40ft (~58 CBM).", en: "needs a 40ft container (~58 CBM)." } };
+  if (cbm <= 68) return { code: "40HC", note: { sw: "linahitaji kontena la 40HC (~68 CBM).", en: "needs a 40HC container (~68 CBM)." } };
+  return { code: "multi", note: { sw: "linazidi kontena moja \u2014 utahitaji kontena zaidi ya moja au FCL nyingi.", en: "exceeds one container \u2014 you'll need more than one container / multiple FCL." } };
+}
+function tryCalculators(raw) {
+  const q = normalize3(raw);
+  const nums = pickNumbers(raw);
+  const wantsVolumetric = /(volumetric|chargeable|dimensional|dim weight|uzito wa ujazo)/.test(q) || /(air|ndege|courier)/.test(q) && /(weight|uzito)/.test(q);
+  const wantsCbm = /(cbm|ujazo|m3|cubic|volume)/.test(q);
+  const wantsFit = /(container fit|kontena gani|which container|fit.*container|nawezaje.*kontena)/.test(q);
+  const wantsLanded = /(landed cost|landed-cost|gharama ya mwisho|jumla ya gharama|total cost of import)/.test(q) && /(freight|nauli|shipping|insurance|bima|handling|port charges|ada za bandari)/.test(q);
+  const wantsDuty = !wantsLanded && /(duty|ushuru|tozo la forodha|landed cost|import tax|kodi ya forodha|customs charge|compute duty|kokotoa ushuru|estimate duty)/.test(q);
+  if (wantsLanded && nums.length >= 1) {
+    const country = pickCountryVat(q) || { name: "Tanzania", rate: 18 };
+    const rawNorm = (raw || "").toLowerCase();
+    const labelled = (re) => {
+      const m = rawNorm.match(re);
+      return m ? Number(m[1]) : null;
+    };
+    const goods = labelled(/(?:goods|value|cif|thamani|bidhaa)\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)/);
+    const freight = labelled(/(?:freight|nauli|shipping)\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)/);
+    const insurance = labelled(/(?:insurance|bima)\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)/);
+    const handling = labelled(/(?:handling|port|bandari|ada)\s*(?:charges|fee|fees)?\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)/);
+    let gGoods = goods ?? 0;
+    let gFreight = freight ?? 0;
+    let gIns = insurance ?? 0;
+    let gHandling = handling ?? 0;
+    if (goods == null && freight == null && insurance == null && handling == null) {
+      [gGoods = 0, gFreight = 0, gIns = 0, gHandling = 0] = nums;
+    }
+    const dutyRatePct = labelled(/(\d+(?:\.\d+)?)\s*(?:%|percent|asilimia)/);
+    const dutyRate = (dutyRatePct ?? 0) / 100;
+    const cif = gGoods + gFreight + gIns;
+    const d = estimateDuty({ customsValue: cif, dutyRate, vatRate: country.rate / 100 });
+    const landed = d.landedCost + gHandling;
+    return {
+      topic: "calc-landed-cost",
+      data: {
+        country: country.name,
+        goods: gGoods,
+        freight: gFreight,
+        insurance: gIns,
+        cif,
+        dutyRate: dutyRatePct ?? 0,
+        duty: d.duty,
+        vatRate: country.rate,
+        vat: d.vat,
+        handling: gHandling,
+        landedCost: landed
+      },
+      text: {
+        sw: `Gharama ya mwisho (landed cost, ${country.name}): bidhaa ${fmt(gGoods)} + nauli ${fmt(gFreight)} + bima ${fmt(gIns)} = CIF ${fmt(cif)}. Import duty ${fmt(dutyRatePct ?? 0)}% = ${fmt(d.duty)}; VAT ${fmt(country.rate)}% = ${fmt(d.vat)}; ada za bandari/handling ${fmt(gHandling)}. Jumla ya landed cost \u2248 ${fmt(landed)}.`,
+        en: `Landed cost (${country.name}): goods ${fmt(gGoods)} + freight ${fmt(gFreight)} + insurance ${fmt(gIns)} = CIF ${fmt(cif)}. Import duty ${fmt(dutyRatePct ?? 0)}% = ${fmt(d.duty)}; VAT ${fmt(country.rate)}% = ${fmt(d.vat)}; port/handling ${fmt(gHandling)}. Total landed cost \u2248 ${fmt(landed)}.`
+      }
+    };
+  }
+  if (wantsDuty && nums.length >= 1) {
+    const country = pickCountryVat(q) || { name: "Tanzania", rate: 18 };
+    let dutyRate = null;
+    const rawNorm = (raw || "").toLowerCase();
+    const pctMatch = rawNorm.match(/(\d+(?:\.\d+)?)\s*(?:%|percent|asilimia)/) || rawNorm.match(/asilimia\s*(\d+(?:\.\d+)?)/);
+    const dutyAdjMatch = q.match(/(?:duty|ushuru|import duty)\s*(?:of|at|wa|ya|=|:)?\s*(\d+(?:\.\d+)?)/) || q.match(/(\d+(?:\.\d+)?)\s*(?:duty|ushuru)/);
+    if (pctMatch) dutyRate = Number(pctMatch[1]);
+    else if (dutyAdjMatch) dutyRate = Number(dutyAdjMatch[1]);
+    else if (nums.length === 2) {
+      const small = Math.min(nums[0], nums[1]);
+      if (small <= 100) dutyRate = small;
+    }
+    const candidates = nums.filter((n) => n !== dutyRate);
+    const customsValue = (candidates.length ? candidates : nums).reduce((a, b) => Math.max(a, b), 0);
+    if (customsValue > 0) {
+      const dr = dutyRate ?? 0;
+      const dutyAmt = customsValue * dr / 100;
+      const vatBase = customsValue + dutyAmt;
+      const vatAmt = vatBase * country.rate / 100;
+      const total = dutyAmt + vatAmt;
+      const landed = customsValue + total;
+      const drNote = dutyRate == null;
+      return {
+        topic: "calc-duty",
+        data: {
+          country: country.name,
+          customsValue,
+          dutyRate: dr,
+          dutyAmount: Number(dutyAmt.toFixed(2)),
+          vatRate: country.rate,
+          vatAmount: Number(vatAmt.toFixed(2)),
+          totalTaxes: Number(total.toFixed(2)),
+          landedCost: Number(landed.toFixed(2))
+        },
+        text: {
+          sw: `Makadirio ya kodi (${country.name}, VAT ${fmt(country.rate)}%): thamani ya forodha (CIF) = ${fmt(customsValue)}.` + (drNote ? " (Hujataja kiwango cha import duty \u2014 nimetumia 0%; ongeza mfano '25% duty'.)" : ` Import duty ${fmt(dr)}% = ${fmt(dutyAmt)}.`) + ` VAT ${fmt(country.rate)}% kwa (CIF + duty = ${fmt(vatBase)}) = ${fmt(vatAmt)}. Jumla ya kodi = ${fmt(total)}. Gharama ya mwisho (landed) \u2248 ${fmt(landed)}.`,
+          en: `Tax estimate (${country.name}, VAT ${fmt(country.rate)}%): customs (CIF) value = ${fmt(customsValue)}.` + (drNote ? " (No import-duty rate given \u2014 used 0%; add e.g. '25% duty'.)" : ` Import duty ${fmt(dr)}% = ${fmt(dutyAmt)}.`) + ` VAT ${fmt(country.rate)}% on (CIF + duty = ${fmt(vatBase)}) = ${fmt(vatAmt)}. Total taxes = ${fmt(total)}. Landed cost \u2248 ${fmt(landed)}.`
+        }
+      };
+    }
+  }
+  if (wantsVolumetric && nums.length >= 3) {
+    const [l, w, h, actual] = nums;
+    const divisor = /courier/.test(q) ? 5e3 : 6e3;
+    const cm = l <= 12 && w <= 12 && h <= 12 ? [l * 100, w * 100, h * 100] : [l, w, h];
+    const volWeight = cm[0] * cm[1] * cm[2] / divisor;
+    const chargeable = actual != null ? Math.max(volWeight, actual) : volWeight;
+    return {
+      topic: "calc-volumetric",
+      data: { volumetricKg: Number(volWeight.toFixed(2)), divisor, actualKg: actual ?? null, chargeableKg: Number(chargeable.toFixed(2)) },
+      text: {
+        sw: `Uzito wa ujazo (volumetric) = (${fmt(cm[0], 0)}\xD7${fmt(cm[1], 0)}\xD7${fmt(cm[2], 0)}) \xF7 ${divisor} = ${fmt(volWeight)} kg.` + (actual != null ? ` Uzito halisi = ${fmt(actual)} kg, hivyo uzito wa kulipia (chargeable) = ${fmt(chargeable)} kg.` : ` (Toa uzito halisi ili nipate chargeable = kubwa kati ya hizo mbili.)`),
+        en: `Volumetric weight = (${fmt(cm[0], 0)}\xD7${fmt(cm[1], 0)}\xD7${fmt(cm[2], 0)}) \xF7 ${divisor} = ${fmt(volWeight)} kg.` + (actual != null ? ` Actual weight = ${fmt(actual)} kg, so chargeable weight = ${fmt(chargeable)} kg.` : ` (Give the actual weight too and chargeable = the greater of the two.)`)
+      }
+    };
+  }
+  if ((wantsCbm || wantsFit) && nums.length >= 3) {
+    const [a, b, c] = nums;
+    const { metres, assumedCm } = toMetres([a, b, c]);
+    const cbm = metres[0] * metres[1] * metres[2];
+    const hint = containerHint(cbm);
+    const unitSw = assumedCm ? "(nimedhani sentimita)" : "(mita)";
+    const unitEn = assumedCm ? "(assumed centimetres)" : "(metres)";
+    return {
+      topic: "calc-cbm",
+      data: { cbm: Number(cbm.toFixed(4)), dimsMetres: metres.map((m) => Number(m.toFixed(3))), assumedCm, container: hint.code },
+      text: {
+        sw: `Ujazo (CBM) = ${fmt(metres[0], 3)}\xD7${fmt(metres[1], 3)}\xD7${fmt(metres[2], 3)} m = ${fmt(cbm, 3)} m\xB3 ${unitSw}. Kwa mwongozo, ${hint.note.sw}`,
+        en: `Volume (CBM) = ${fmt(metres[0], 3)}\xD7${fmt(metres[1], 3)}\xD7${fmt(metres[2], 3)} m = ${fmt(cbm, 3)} m\xB3 ${unitEn}. As a guide, it ${hint.note.en}`
+      }
+    };
+  }
+  if (wantsFit && nums.length === 1) {
+    const cbm = nums[0];
+    const hint = containerHint(cbm);
+    return {
+      topic: "calc-fit",
+      data: { cbm, container: hint.code },
+      text: {
+        sw: `Kwa ujazo wa ${fmt(cbm)} m\xB3, ${hint.note.sw}`,
+        en: `For ${fmt(cbm)} m\xB3 of cargo, it ${hint.note.en}`
+      }
+    };
+  }
+  return null;
+}
+function matchKeyword(key, base, qTokens, qTokenSet, qCanon, qNorm) {
+  if (key.includes(" ")) {
+    return qNorm.includes(key) ? base + 1 : 0;
+  }
+  if (qTokenSet.has(key)) return base + 1;
+  if (qCanon.has(canonicalOf(key))) return base + 0.5;
+  if (key.length >= 5) {
+    for (const t of qTokens) {
+      if (t.length >= 4 && levensteinAtMost(t, key, 1)) return base + 0.5;
+    }
+  }
+  if (qNorm.includes(key)) return base * 0.5;
+  return 0;
+}
+function scoreIntent(qTokens, qTokenSet, qCanon, qNorm, intent) {
+  let score6 = 0;
+  for (const k of intent.strong || []) score6 += matchKeyword(k, 2, qTokens, qTokenSet, qCanon, qNorm);
+  for (const k of intent.keys) score6 += matchKeyword(k, 1, qTokens, qTokenSet, qCanon, qNorm);
+  return score6;
+}
+function askLogistics(q, ctx) {
+  let qNorm = normalize3(q);
+  let qTokens = tokens5(q);
+  const turnEntities = extractEntities(qNorm);
+  const mergedEntities = { ...ctx?.entities || {}, ...turnEntities };
+  if (OFF_TOPIC.some((w) => qNorm.includes(w))) {
+    return REFUSAL;
+  }
+  const isFollowUp = !!ctx && (looksLikeFollowUp2(qNorm) || Object.keys(turnEntities).length === 0) && q.trim().split(/\s+/).length <= 7;
+  if (isFollowUp) {
+    const hints = [];
+    if (ctx?.entities?.country) {
+      hints.push(ctx.entities.country);
+      const a = COUNTRY_STRONG_ALIAS[ctx.entities.country];
+      if (a) hints.push(a);
+    }
+    if (ctx?.entities?.corridor) hints.push(ctx.entities.corridor);
+    if (ctx?.entities?.mode) hints.push(ctx.entities.mode);
+    if (hints.length) {
+      qNorm = normalize3(`${q} ${hints.join(" ")}`);
+      qTokens = tokens5(qNorm);
+    }
+  }
+  const qTokenSet = new Set(qTokens);
+  const qCanon = synonymCanonicals(qTokens);
+  const calc = tryCalculators(q);
+  if (calc) {
+    calc.data = { ...calc.data || {}, entities: mergedEntities };
+    return enrich(calc);
+  }
+  if (/(hs code|hs-code|classif|uainishaji|tariff code|sura ya hs)/.test(qNorm)) {
+    const hs = tryHsHint(qNorm);
+    if (hs) {
+      hs.data = { ...hs.data || {}, entities: mergedEntities };
+      return hs;
+    }
+  }
+  let best = null;
+  let bestScore = 0;
+  for (const intent of INTENTS) {
+    const s = scoreIntent(qTokens, qTokenSet, qCanon, qNorm, intent);
+    if (s > bestScore) {
+      bestScore = s;
+      best = intent;
+    }
+  }
+  if (best && bestScore > 0) {
+    const ans = { topic: best.topic, text: best.answer, data: { entities: mergedEntities } };
+    return enrich(ans);
+  }
+  return {
+    topic: "fallback",
+    data: { entities: mergedEntities },
+    text: {
+      sw: "Naweza kukusaidia na usafirishaji kote Afrika na CargoLink: forodha za nchi (TRA, KRA, URA, RRA, OBR, DGDA, SARS, NCS, GRA, DGD, ECA, ECC, ZRA, ZIMRA, AGT, ADII, BURS) + VAT yao; mifumo (TANCIS, iCMS, ASYCUDA, B'Odogwu, ICUMS, Nafeza, PortNet); jumuiya za kibiashara (EAC/SCT, SADC, ECOWAS/ETLS, COMESA, CEMAC/ECCAS, UMA, IGAD, CEN-SAD, SACU, AfCFTA, WTO/WCO HS code, AEO); bandari na korido (Mombasa/Northern, Dar/Central, Durban/North\u2013South, Lobito, Maputo, Beira, Nacala, Walvis Bay, Abidjan\u2013Lagos, Djibouti\u2013Addis); sheria (rules of origin/EUR.1, RCTG/TIR, COMESA Yellow Card, axle-load, IMDG/ADR, SPS/phytosanitary, PVoC, Incoterms 2020); na hesabu (duty+VAT kwa nchi, CBM, volumetric). Niulize lolote kati ya haya.",
+      en: "I can help with logistics across Africa & CargoLink: national customs (TRA, KRA, URA, RRA, OBR, DGDA, SARS, NCS, GRA, DGD, ECA, ECC, ZRA, ZIMRA, AGT, ADII, BURS) + their VAT; systems (TANCIS, iCMS, ASYCUDA, B'Odogwu, ICUMS, Nafeza, PortNet); trade blocs (EAC/SCT, SADC, ECOWAS/ETLS, COMESA, CEMAC/ECCAS, UMA, IGAD, CEN-SAD, SACU, AfCFTA, WTO/WCO HS code, AEO); ports & corridors (Mombasa/Northern, Dar/Central, Durban/North\u2013South, Lobito, Maputo, Beira, Nacala, Walvis Bay, Abidjan\u2013Lagos, Djibouti\u2013Addis); laws (rules of origin/EUR.1, RCTG/TIR, COMESA Yellow Card, axle-load, IMDG/ADR, SPS/phytosanitary, PVoC, Incoterms 2020); and maths (per-country duty+VAT, CBM, volumetric). Ask me any of these."
+    }
+  };
+}
+
+// src/akili/experts/logistiki/index.ts
+var STRIP10 = /[^\p{L}\p{N}']+/gu;
+var norm9 = (s) => (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP10, " ").replace(/\s+/g, " ").trim();
+function hasCue6(hay, cue) {
+  return ` ${hay} `.includes(` ${cue} `) || hay === cue;
+}
+function cueScore6(text, cues, cap = 0.93) {
+  const n = norm9(text);
+  if (!n) return 0;
+  const seen = /* @__PURE__ */ new Set();
+  for (const c of cues) {
+    if (hasCue6(n, c)) seen.add(c);
+    if (seen.size >= 3) break;
+  }
+  const hits = seen.size;
+  if (hits === 0) return 0;
+  return Math.min(cap, 0.34 + hits * 0.23);
+}
+var LOGISTIKI_CUES = [
+  // Kiswahili
+  "forodha",
+  "bandari",
+  "meli",
+  "mzigo",
+  "mizigo",
+  "kontena",
+  "usafirishaji",
+  "kusafirisha",
+  "ushuru",
+  "wakala wa forodha",
+  "kuagiza",
+  "kuuza nje",
+  "korido",
+  "reli",
+  "sgr",
+  "malori",
+  "lori",
+  "mpakani",
+  "transit",
+  "fuatilia mzigo",
+  "nyaraka za forodha",
+  "tansad",
+  "incoterm",
+  "cbm",
+  // Authorities / blocs (strong logistics signal)
+  "tra",
+  "tancis",
+  "tasac",
+  "taffa",
+  "tpa",
+  "tbs",
+  "eac",
+  "comesa",
+  "afcfta",
+  "kra",
+  "asycuda",
+  // English
+  "logistics",
+  "customs",
+  "clearing",
+  "freight",
+  "shipping",
+  "shipment",
+  "port",
+  "container",
+  "cargo",
+  "haulage",
+  "import",
+  "export",
+  "duty",
+  "landed cost",
+  "corridor",
+  "incoterms",
+  "bill of lading",
+  "demurrage",
+  "consignment",
+  "forwarder",
+  "warehouse receipt",
+  "phytosanitary"
+];
+function mapSources2(lx) {
+  const out = (lx.sources ?? []).map((s) => ({ label: s.name, ref: s.note }));
+  out.push({ label: "CargoLink Rubani", ref: "Laetoli" });
+  return out;
+}
+var logistikiExpert = {
+  id: "logistiki-rubani",
+  domain: "logistiki",
+  label: "Logistiki",
+  match(q) {
+    return cueScore6(q.text ?? "", LOGISTIKI_CUES);
+  },
+  answer(q) {
+    const lang = q.lang === "en" ? "en" : "sw";
+    const lx = askLogistics(q.text ?? "", {
+      entities: q.context?.logistics?.entities,
+      lastTopic: q.context?.logistics?.lastTopic
+    });
+    const isFallback = /fallback|unknown|general/i.test(lx.topic);
+    const confidence = isFallback ? "medium" : "high";
+    const sw = lx.text.sw;
+    const en = lx.text.en;
+    void lang;
+    return {
+      domain: "logistiki",
+      expert: logistikiExpert.id,
+      text: en ? { sw, en } : { sw },
+      confidence,
+      sources: mapSources2(lx),
+      data: lx
+      // full LxAnswer — topic, steps, actions, entities
+    };
+  }
+};
+
+// src/akili/experts/kodi/index.ts
+var STRIP11 = /[^\p{L}\p{N}']+/gu;
+var norm10 = (s) => (s ?? "").toLowerCase().normalize("NFKC").replace(STRIP11, " ").replace(/\s+/g, " ").trim();
+function hasCue7(hay, cue) {
+  return ` ${hay} `.includes(` ${cue} `) || hay === cue;
+}
+function cueScore7(text, cues, cap = 0.92) {
+  const n = norm10(text);
+  if (!n) return 0;
+  const seen = /* @__PURE__ */ new Set();
+  for (const c of cues) {
+    if (hasCue7(n, c)) seen.add(c);
+    if (seen.size >= 3) break;
+  }
+  const hits = seen.size;
+  if (hits === 0) return 0;
+  return Math.min(cap, 0.32 + hits * 0.23);
+}
+var KODI_CUES = [
+  // Kiswahili — core
+  "kodi",
+  "ushuru",
+  "tra",
+  "mlipakodi",
+  "walipakodi",
+  "tin",
+  "nambari ya mlipakodi",
+  "vat",
+  "ongezeko la thamani",
+  "makadirio",
+  "kodi ya makadirio",
+  "risiti",
+  "efd",
+  "vfd",
+  "kifaa cha kielektroniki",
+  "pingamizi",
+  "malalamiko",
+  "rufaa",
+  "trab",
+  "trat",
+  "tathmini",
+  "adhabu",
+  "faini",
+  "riba",
+  "kutolipa",
+  "kuchelewa kulipa",
+  "paye",
+  "kodi ya mapato",
+  "mapato",
+  "forodha",
+  "ushuru wa forodha",
+  "brela",
+  "leseni",
+  "usajili wa biashara",
+  "gepg",
+  "namba ya udhibiti",
+  "malipo ya kodi",
+  "tamko la kodi",
+  "return",
+  "tathmini ya kodi",
+  "ukaguzi wa kodi",
+  "mkaguzi",
+  "msamaha wa kodi",
+  "punguzo la kodi",
+  "stakabadhi",
+  // Kiswahili — new topics
+  "kodi ya zuio",
+  "zuio",
+  "stempu",
+  "stempu ya kodi",
+  "sdl",
+  "maendeleo ya ujuzi",
+  "cheti cha kodi",
+  "kutokuwa na deni",
+  "kibali cha kodi",
+  "kupangisha",
+  "kodi ya pango",
+  "faida ya mtaji",
+  "kuuza kiwanja",
+  "kuuza nyumba",
+  "ukaguzi",
+  "mkaguzi wa kodi",
+  "rushwa",
+  "takukuru",
+  "pccb",
+  "zanzibar",
+  "zrb",
+  "e invoicing",
+  "risiti za kielektroniki mtandaoni",
+  "kufungwa akaunti",
+  "kukamata bidhaa",
+  "kutaifisha",
+  "mauzo ya mtandaoni",
+  "matangazo ya mtandaoni",
+  "kiwanja",
+  "facebook ads",
+  "google ads",
+  // English
+  "tax",
+  "taxes",
+  "taxpayer",
+  "tin",
+  "vat",
+  "value added tax",
+  "presumptive tax",
+  "turnover tax",
+  "receipt",
+  "fiscal device",
+  "objection",
+  "appeal",
+  "assessment",
+  "penalty",
+  "interest",
+  "paye",
+  "income tax",
+  "customs",
+  "excise",
+  "duty",
+  "business registration",
+  "licence",
+  "license",
+  "control number",
+  "tax return",
+  "tax audit",
+  "auditor",
+  "tax exemption",
+  "tax relief",
+  "withholding tax",
+  "digital service tax",
+  "e-filing",
+  "taxpayer portal",
+  // English — new topics
+  "withholding",
+  "stamp duty",
+  "skills development levy",
+  "tax clearance",
+  "clearance certificate",
+  "rental income",
+  "rent tax",
+  "capital gains",
+  "capital gains tax",
+  "tax audit",
+  "corruption",
+  "bribery",
+  "whistleblower",
+  "zanzibar revenue",
+  "e-invoicing",
+  "account frozen",
+  "seizure",
+  "enforcement",
+  "online sellers",
+  "facebook ads",
+  "google ads"
+];
+var KB5 = [
+  {
+    id: "tin-usajili",
+    cues: ["tin", "nambari ya mlipakodi", "usajili", "kujisajili", "register", "taxpayer", "namba ya kodi"],
+    sw: "Kupata TIN (Nambari ya Mlipakodi):\n\u2022 Jisajili bila malipo kupitia Taxpayer Portal ya TRA (taxpayerportal.tra.go.tz) au kituo cha TRA kilicho karibu nawe.\n\u2022 Mtu binafsi anahitaji kitambulisho cha NIDA; kampuni inahitaji cheti cha usajili cha BRELA kwanza.\n\u2022 TIN ni ya lazima kabla ya kufungua akaunti benki ya biashara, kupata leseni ya biashara, au kushiriki zabuni za serikali.\n\u2022 TIN, usajili BRELA, na leseni ya biashara ya halmashauri ni vitu VITATU tofauti \u2014 vyote vinahitajika, si mbadala wa kila kimoja.",
+    en: "Getting a TIN (Taxpayer Identification Number):\n\u2022 Register free via the TRA Taxpayer Portal (taxpayerportal.tra.go.tz) or your nearest TRA office.\n\u2022 Individuals need a NIDA national ID; companies need a BRELA certificate of incorporation first.\n\u2022 A TIN is required before opening a business bank account, getting a business licence, or bidding on government tenders.\n\u2022 TIN, BRELA registration, and a council business licence are THREE separate things \u2014 all are needed, none replaces another.",
+    sources: [
+      { label: "TRA \u2014 Taxpayer Portal", url: "https://taxpayerportal.tra.go.tz" },
+      { label: "BRELA \u2014 Wakala wa Usajili wa Biashara", url: "https://www.brela.go.tz" }
+    ]
+  },
+  {
+    id: "vat-usajili",
+    cues: ["vat", "ongezeko la thamani", "usajili wa vat", "kiwango cha vat", "value added tax", "vat registration", "18%"],
+    sw: "VAT (Kodi ya Ongezeko la Thamani):\n\u2022 Kiwango cha kawaida cha VAT ni 18%.\n\u2022 Usajili wa LAZIMA unatakiwa mauzo ya biashara yakizidi TZS milioni 200 kwa mwaka (Tanzania Bara) au milioni 100 (Zanzibar).\n\u2022 Ukifikisha kiwango hicho, una siku 30 kujisajili VAT tangu tarehe uliyovuka kiwango.\n\u2022 Biashara ndogo zaidi ya kiwango zinaweza kujisajili kwa hiari (voluntary registration).\n\u2022 Taasisi za serikali na baadhi ya makampuni ya kigeni yanayotoa huduma za kidijitali Tanzania (mfano huduma za mtandaoni kwa watumiaji) hutakiwa kujisajili VAT hata bila kufikia kiwango.",
+    en: "VAT (Value Added Tax):\n\u2022 The standard VAT rate is 18%.\n\u2022 MANDATORY registration applies once annual taxable turnover exceeds TZS 200 million (Mainland) or TZS 100 million (Zanzibar).\n\u2022 Once you cross that threshold you have 30 days to register from the date you first exceeded it.\n\u2022 Smaller businesses below the threshold may register voluntarily.\n\u2022 Government bodies and some non-resident digital suppliers serving Tanzanian consumers must register regardless of turnover.",
+    sources: [
+      { label: "The Value Added Tax Act (Tanzania)" },
+      { label: "TRA \u2014 Value Added Tax (VAT)", url: "https://www.tra.go.tz/page/value-added-tax-vat" }
+    ]
+  },
+  {
+    id: "kodi-makadirio",
+    cues: ["makadirio", "kodi ya makadirio", "presumptive", "turnover tax", "mauzo madogo", "biashara ndogo kodi"],
+    sw: "Kodi ya Makadirio (Presumptive Tax) kwa biashara ndogo:\n\u2022 Inatumika kwa mtu binafsi mwenye biashara yenye mauzo (turnover) hadi TZS milioni 100 kwa mwaka.\n\u2022 Badala ya kuandaa hesabu kamili za faida na hasara, unalipa kiwango kidogo kinacholingana na kiwango cha mauzo yako (bendi za mauzo, si asilimia moja tu).\n\u2022 HAITUMIKI kwa huduma za kitaalamu/ufundi (professional, technical, management, construction, training) \u2014 hizo hulipa kodi ya kawaida ya mapato.\n\u2022 Changamoto inayojulikana: biashara yenye faida ndogo (low margin) inaweza kulipa kiwango kikubwa zaidi kuliko biashara ya faida kubwa yenye mauzo sawa \u2014 kwa sababu kodi inategemea MAUZO si FAIDA.\n\u2022 Pata bendi na kiwango sahihi cha mwaka husika kwenye jedwali rasmi la TRA (Taxes and Duties at a Glance).",
+    en: `Presumptive (turnover-based) tax for small businesses:
+\u2022 Applies to an individual whose business turnover is up to TZS 100 million per year.
+\u2022 Instead of full profit-and-loss accounts, you pay a small fixed amount set by your turnover band.
+\u2022 Does NOT apply to professional/technical/management/construction/training services \u2014 those pay standard income tax.
+\u2022 Known fairness issue: a low-margin business can pay proportionally more than a high-margin one with the same turnover, because the tax is based on SALES, not PROFIT.
+\u2022 Check the current year's official band table (TRA "Taxes and Duties at a Glance") for exact figures.`,
+    sources: [
+      { label: "Income Tax Act (Tanzania), Third Schedule" },
+      { label: "TRA \u2014 Taxes and Duties at a Glance", url: "https://www.tra.go.tz/images/uploads/pages/TAXES_AND_DUTIES_AT_A_GLANCE_2025_2026.pdf" }
+    ]
+  },
+  {
+    id: "efd-vfd",
+    cues: ["efd", "vfd", "risiti", "kifaa cha kielektroniki", "fiscal device", "receipt", "stakabadhi", "mashine ya risiti"],
+    sw: "EFD/VFD (Vifaa vya Kielektroniki vya Kutolea Risiti):\n\u2022 Kisheria, kila mauzo LAZIMA yatolewe risiti ya kielektroniki \u2014 ni kosa kutokutoa risiti.\n\u2022 EFD (mashine) hugharimu zaidi ya TZS milioni 2, jambo linalolemea wafanyabiashara wadogo.\n\u2022 VFD (Virtual Fiscal Device) ni mbadala nafuu zaidi \u2014 programu inayoweza kutumika kwenye simu/kompyuta badala ya mashine ya bei ghali.\n\u2022 Changamoto za kawaida: kukatika kwa umeme/mtandao, gharama ya matengenezo, na ukosefu wa mafunzo kwa watumiaji.\n\u2022 Toa risiti kwa kila mteja \u2014 hata mteja mmoja asiyepewa risiti ni ushahidi wa mauzo yasiyoripotiwa.",
+    en: "EFD/VFD (Electronic/Virtual Fiscal Devices):\n\u2022 By law, every sale MUST be issued an electronic receipt \u2014 failing to do so is an offence.\n\u2022 An EFD machine costs over TZS 2 million, a real burden for small traders.\n\u2022 A VFD (Virtual Fiscal Device) is a cheaper alternative \u2014 software on a phone/computer instead of a costly machine.\n\u2022 Common barriers: power/network outages, maintenance cost, and lack of user training.\n\u2022 Issue a receipt for every transaction \u2014 even one unreceipted sale is evidence of unreported income.",
+    sources: [
+      { label: "TRA \u2014 Know About Electronic Fiscal Devices (EFD)", url: "https://www.tra.go.tz/page/know-about-e-fiscal-devices-efd" },
+      { label: "Tax Administration Act, 2015 (R.E. 2019)" }
+    ]
+  },
+  {
+    id: "pingamizi-rufaa",
+    cues: ["pingamizi", "malalamiko", "rufaa", "trab", "trat", "tathmini", "objection", "appeal", "assessment", "kupinga kodi", "mapatano", "mediation"],
+    sw: "Pingamizi na Rufaa dhidi ya tathmini ya kodi:\n\u2022 Ukipingana na tathmini ya TRA, wasilisha PINGAMIZI kwa Kamishna Mkuu ndani ya SIKU 30 tangu kupokea uamuzi, kwa maandishi na vielelezo.\n\u2022 Pingamizi halitapokelewa mpaka ulipe kodi isiyobishaniwa AU THULUTHI MOJA (1/3) ya kodi iliyokadiriwa \u2014 kiwango kikubwa zaidi kati ya viwili hivyo (isipokuwa Kamishna Mkuu aridhie punguzo kwa sababu za msingi).\n\u2022 Ukikosa muda, unaweza kuomba nyongeza ya muda (hadi siku 30) \u2014 ombi liwasilishwe angalau siku 7 kabla ya ukomo.\n\u2022 Usipokubaliana na uamuzi wa pingamizi, kata rufaa Bodi ya Rufaa za Kodi (TRAB), kisha Baraza la Rufaa za Kodi (TRAT), na hatimaye Mahakama ya Rufaa.\n\u2022 MAPATANO (mediation): tangu Sheria ya Fedha 2021, unaweza kuomba mapatano na TRA badala ya njia ndefu ya mahakama \u2014 ombi huwasilishwa kwa Kamishna Mkuu, ingawa sheria haiweki ukomo maalum wa muda wa kukamilisha mapatano hayo.",
+    en: "Objecting to and appealing a tax assessment:\n\u2022 If you disagree with a TRA assessment, file a written Notice of Objection to the Commissioner General within 30 DAYS of receiving the decision, with supporting evidence.\n\u2022 The objection is not admitted until you pay the undisputed tax OR ONE-THIRD (1/3) of the assessed tax, whichever is greater (unless the Commissioner General grants a waiver for good reason).\n\u2022 Missed the deadline? You can request an extension (up to 30 more days) \u2014 apply at least 7 days before the deadline expires.\n\u2022 If you disagree with the objection decision, appeal to the Tax Revenue Appeals Board (TRAB), then the Tax Revenue Appeals Tribunal (TRAT), and finally the Court of Appeal.\n\u2022 MEDIATION: since the 2021 Finance Act you can request mediation with TRA instead of the long court route \u2014 submitted to the Commissioner General, though the law sets no fixed timeline for completing it.",
+    sources: [
+      { label: "Tax Administration Act, 2015 (R.E. 2019)" },
+      { label: "TRA \u2014 Objections & Appeals", url: "https://www.tra.go.tz/page/objections-appeals" },
+      { label: "Tax Revenue Appeals Board (TRAB)", url: "https://www.trab.go.tz" }
+    ]
+  },
+  {
+    id: "adhabu-riba",
+    cues: ["adhabu", "faini", "riba", "kutolipa", "kuchelewa", "penalty", "interest", "late payment", "kuchelewa kulipa"],
+    sw: "Adhabu na riba kwa kuchelewa kulipa/kutamka kodi:\n\u2022 Kutotamka (kuwasilisha return) au kutolipa kodi kwa wakati kunapelekea FAINI na RIBA juu ya kiasi kinachodaiwa.\n\u2022 Riba huongezeka kila mwezi kadiri deni linavyoendelea \u2014 deni dogo linaweza kukua haraka.\n\u2022 Kuwasilisha return kwa wakati hata kama huna uwezo wa kulipa mara moja ni bora zaidi ya kutowasilisha kabisa \u2014 unaweza kuomba mpango wa malipo (payment plan) na TRA.\n\u2022 Rekodi safi na malipo ya wakati ndiyo njia rahisi zaidi ya kuepuka adhabu.",
+    en: "Penalties and interest for late payment/filing:\n\u2022 Failing to file a return or pay tax on time triggers PENALTIES and INTEREST on the amount owed.\n\u2022 Interest accrues monthly on the outstanding balance \u2014 a small debt can grow quickly.\n\u2022 Filing on time even if you can't pay in full immediately is better than not filing at all \u2014 you can request a payment plan with TRA.\n\u2022 Clean records and on-time payment are the simplest way to avoid penalties.",
+    sources: [{ label: "Tax Administration Act, 2015 (R.E. 2019)" }]
+  },
+  {
+    id: "kodi-mapato-paye",
+    cues: ["paye", "kodi ya mapato", "mshahara", "income tax", "employee tax", "mapato ya ajira", "kodi ya kampuni", "corporate tax"],
+    sw: "Kodi ya Mapato (Kampuni) na PAYE (Wafanyakazi):\n\u2022 Kampuni zinalipa kodi ya mapato juu ya faida halisi (mapato \u2212 gharama halali), kwa kiwango cha kawaida cha ushirika.\n\u2022 PAYE (Pay As You Earn) ni kodi ya mshahara inayokatwa na mwajiri moja kwa moja kutoka mshahara wa mfanyakazi kila mwezi, kwa bendi za viwango vinavyopanda kadiri mshahara unavyoongezeka.\n\u2022 Mwajiri ndiye mwenye wajibu wa kukata na kuwasilisha PAYE TRA \u2014 mfanyakazi hahitaji kuwasilisha mwenyewe kwa kawaida.\n\u2022 Watu binafsi wenye vyanzo vingine vya mapato (mfano kodi ya nyumba, biashara ya ziada) huenda wakahitaji kutamka mapato hayo tofauti.",
+    en: "Corporate Income Tax and PAYE (employees):\n\u2022 Companies pay income tax on actual profit (income minus allowable expenses), at the standard corporate rate.\n\u2022 PAYE (Pay As You Earn) is salary tax withheld directly by the employer each month, on a rising scale of bands as salary increases.\n\u2022 The employer is responsible for withholding and remitting PAYE to TRA \u2014 employees don't normally file it themselves.\n\u2022 Individuals with other income sources (e.g. rental income, side business) may need to declare that income separately.",
+    sources: [{ label: "Income Tax Act (Tanzania)" }]
+  },
+  {
+    id: "forodha-ushuru",
+    cues: ["forodha", "ushuru wa forodha", "customs", "excise", "duty", "kuagiza bidhaa", "import", "export"],
+    sw: 'Ushuru wa Forodha na Bidhaa Maalum (Excise):\n\u2022 Bidhaa zinazoingizwa nchini hutozwa ushuru wa forodha kulingana na Jedwali la Pamoja la Ushuru la Jumuiya ya Afrika Mashariki (EAC Common External Tariff).\n\u2022 Baadhi ya bidhaa (mfano vinywaji, sigara, mafuta) hutozwa ziada ya "excise duty" juu ya ushuru wa kawaida.\n\u2022 Wafanyabiashara wa kuagiza/kuuza nje wanahitaji TIN na usajili maalum wa forodha (ASYCUDA) kabla ya kufanya biashara ya kimataifa.',
+    en: "Customs Duty and Excise:\n\u2022 Imported goods are taxed under the East African Community Common External Tariff (EAC CET).\n\u2022 Certain goods (e.g. beverages, cigarettes, fuel) carry an additional excise duty on top of standard customs duty.\n\u2022 Import/export traders need a TIN and a customs registration (ASYCUDA) before trading internationally.",
+    sources: [{ label: "East African Community Customs Management Act" }, { label: "TRA \u2014 Customs & Excise" }]
+  },
+  {
+    id: "taasisi-husika",
+    cues: ["brela", "nida", "tcra", "leseni", "usajili wa biashara", "business registration", "licence", "taasisi", "halmashauri"],
+    sw: "Taasisi husika mbali na TRA:\n\u2022 BRELA \u2014 usajili wa jina la biashara/kampuni (unahitajika kabla ya TIN kwa makampuni).\n\u2022 NIDA \u2014 kitambulisho cha taifa, kinachohitajika kusajili TIN ya mtu binafsi.\n\u2022 Halmashauri (Local Government Authority) \u2014 leseni ya biashara na kodi za huduma za mtaa, tofauti na kodi za TRA.\n\u2022 TCRA \u2014 inasimamia mawasiliano na huduma za pesa za simu zinazotumika kulipia kodi.\n\u2022 Zanzibar Revenue Board (ZRB) \u2014 inasimamia kodi za Zanzibar kwa baadhi ya maeneo yasiyo ya muungano, sambamba na TRA.\nFahamu: mfanyabiashara anaweza kuhitaji taasisi zote hizi kwa nyakati tofauti \u2014 si TRA pekee.",
+    en: "Related institutions beyond TRA:\n\u2022 BRELA \u2014 business/company name registration (required before a company can get a TIN).\n\u2022 NIDA \u2014 national ID, required to register an individual TIN.\n\u2022 Local Government Authority (Halmashauri) \u2014 business licence and local service levies, separate from TRA taxes.\n\u2022 TCRA \u2014 regulates telecoms and the mobile-money rails used to pay taxes.\n\u2022 Zanzibar Revenue Board (ZRB) \u2014 administers Zanzibar's non-union taxes alongside TRA.\nA business may need all of these institutions at different points \u2014 not TRA alone.",
+    sources: [
+      { label: "BRELA \u2014 Wakala wa Usajili wa Biashara", url: "https://www.brela.go.tz" },
+      { label: "NIDA \u2014 Mamlaka ya Vitambulisho vya Taifa", url: "https://www.nida.go.tz" },
+      { label: "TCRA \u2014 Mamlaka ya Mawasiliano Tanzania", url: "https://www.tcra.go.tz" },
+      { label: "Zanzibar Revenue Board (ZRB)", url: "https://www.zanrevenue.org" }
+    ]
+  },
+  {
+    id: "huduma-kidijitali",
+    cues: [
+      "gepg",
+      "namba ya udhibiti",
+      "control number",
+      "taxpayer portal",
+      "huduma za kidijitali",
+      "e-filing",
+      "malipo ya kodi mtandaoni",
+      "app ya tra",
+      "facebook ads",
+      "google ads",
+      "matangazo ya mtandaoni",
+      "digital service tax",
+      "mauzo ya mtandaoni"
+    ],
+    sw: 'Huduma za kidijitali za TRA:\n\u2022 Taxpayer Portal (taxpayerportal.tra.go.tz) \u2014 kuwasilisha tamko (return), kupata namba ya udhibiti (control number), kusimamia EFD/VFD, na kufuatilia marejesho ya kodi.\n\u2022 Malipo hufanyika kupitia GePG (Serikali ya Mtandaoni ya Malipo) \u2014 benki, pesa za simu (M-Pesa/Tigo Pesa/Airtel Money), au wakala.\n\u2022 "TRA Services" app (Google Play) inaruhusu huduma nyingi kufanyika kwa simu bila kuhitaji kompyuta.\n\u2022 Digital Service Tax inatumika kwa makampuni ya kigeni yanayotoa huduma za kidijitali (mfano matangazo mtandaoni kama Facebook/Google Ads, programu) kwa watumiaji Tanzania \u2014 hii inahusisha pia biashara zinazouza mtandaoni kupitia majukwaa ya kigeni.',
+    en: 'TRA digital services:\n\u2022 Taxpayer Portal (taxpayerportal.tra.go.tz) \u2014 file returns, generate a control number, manage EFD/VFD, and track refunds.\n\u2022 Payments go through GePG (Government e-Payment Gateway) \u2014 bank, mobile money (M-Pesa/Tigo Pesa/Airtel Money), or an agent.\n\u2022 The "TRA Services" app (Google Play) lets many services run entirely from a phone.\n\u2022 Digital Service Tax applies to foreign companies providing digital services (e.g. online ads like Facebook/Google Ads, apps) to users in Tanzania \u2014 this also touches businesses selling through foreign online platforms.',
+    sources: [
+      { label: "TRA \u2014 Taxpayer Portal", url: "https://taxpayerportal.tra.go.tz" },
+      { label: "GePG \u2014 Government e-Payment Gateway" },
+      { label: "TRA \u2014 Digital Service Tax", url: "https://www.tra.go.tz/page/digital-service-tax" }
+    ]
+  },
+  {
+    id: "kodi-zuio-wht",
+    cues: ["kodi ya zuio", "zuio", "withholding", "withholding tax", "wht", "kukata kodi kwenye malipo"],
+    sw: "Kodi ya Zuio (Withholding Tax):\n\u2022 Ni kodi inayokatwa na anayelipa (mfano mwajiri, mpangaji, kampuni) kabla ya kumlipa mtu au taasisi nyingine, kisha kuiwasilisha TRA moja kwa moja.\n\u2022 Gawio (dividend): kwa kawaida 10%; 5% kwa kampuni zilizoorodheshwa DSE au kampuni mama yenye hisa 25%+.\n\u2022 Riba (interest, mfano akiba benki): 10%.\n\u2022 Mrabaha (royalty): 15%.\n\u2022 Pango (rent, mfano kodi ya nyumba/jengo la biashara): mpangaji hukata 10% na kuiwasilisha TRA ndani ya siku 7 baada ya mwezi wa malipo.\n\u2022 Kiwango sahihi hutegemea aina ya malipo na hali ya mlipwaji (mkaazi/asiye mkaazi) \u2014 thibitisha na jedwali rasmi la TRA.",
+    en: "Withholding Tax (WHT):\n\u2022 Tax deducted by the PAYER (e.g. employer, tenant, company) before paying another party, then remitted directly to TRA.\n\u2022 Dividends: typically 10%; 5% for DSE-listed companies or a parent holding 25%+ shares.\n\u2022 Interest (e.g. bank savings): 10%.\n\u2022 Royalties: 15%.\n\u2022 Rent (e.g. residential/commercial rent): the tenant withholds 10% and remits it to TRA within 7 days of the month of payment.\n\u2022 The exact rate depends on payment type and residency status \u2014 verify against TRA's official table.",
+    sources: [
+      { label: "TRA \u2014 Withholding Tax", url: "https://www.tra.go.tz/page/withholding-tax" },
+      { label: "Income Tax Act (Tanzania)" }
+    ]
+  },
+  {
+    id: "stempu-stamp-duty",
+    cues: ["stempu", "stempu ya kodi", "stamp duty", "mkataba wa pango", "nyaraka za kisheria"],
+    sw: "Stempu ya Kodi (Stamp Duty):\n\u2022 Hutozwa kwenye nyaraka fulani za kisheria (mfano mkataba wa pango, uhamisho wa mali) chini ya Sheria ya Stempu ya Kodi (Cap 189).\n\u2022 Kwa mkataba wa kupanga (rental agreement), kiwango ni 1% ya kiasi cha pango la mwaka.\n\u2022 Nyaraka lazima zipigwe muhuri (stamped) ndani ya siku 30 tangu kusainiwa \u2014 nyaraka isiyopigwa muhuri haikubaliki mahakamani wala usajili wa ardhi.\n\u2022 Adhabu ya kutopiga muhuri kwa wakati: hadi 25% ya stempu inayodaiwa, au hadi mara 10 ya kiwango sahihi.",
+    en: "Stamp Duty:\n\u2022 Charged on certain legal instruments (e.g. rental agreements, property transfers) under the Stamp Duty Act (Cap 189).\n\u2022 For a rental agreement, the rate is 1% of the annual rent amount.\n\u2022 Instruments must be stamped within 30 days of signing \u2014 an unstamped document is not admissible in court or acceptable for land registration.\n\u2022 Penalty for late stamping: up to 25% of the duty owed, or up to 10 times the correct duty.",
+    sources: [{ label: "TRA \u2014 Stamp Duty", url: "https://www.tra.go.tz/page/stamp-duty" }, { label: "Stamp Duty Act, Cap 189" }]
+  },
+  {
+    id: "sdl",
+    cues: ["sdl", "skills development levy", "maendeleo ya ujuzi", "ushuru wa ujuzi", "kodi ya wafanyakazi kumi"],
+    sw: "SDL (Skills and Development Levy):\n\u2022 Ni kodi analipa MWAJIRI (si mfanyakazi) mwenye wafanyakazi 10 au zaidi.\n\u2022 Kiwango ni asilimia ndogo ya jumla ya malipo ya mishahara (emoluments) kwa mwezi \u2014 thibitisha asilimia sahihi ya mwaka husika kwenye jedwali rasmi la TRA (imekuwa ikipungua miaka ya hivi karibuni).\n\u2022 Baadhi ya taasisi zimesamehewa: serikali, balozi, mashirika ya kidini/hisani yaliyosajiliwa, mashamba, na taasisi za elimu zilizosajiliwa.\n\u2022 Mwajiri huwasilisha SDL pamoja na PAYE kila mwezi.",
+    en: "SDL (Skills and Development Levy):\n\u2022 Paid by the EMPLOYER (not the employee) with 10 or more employees.\n\u2022 The rate is a small percentage of total monthly emoluments \u2014 verify the current year's exact rate against TRA's official table (it has been reduced in recent years).\n\u2022 Some entities are exempt: government, diplomatic missions, registered religious/charitable organizations, farms, and registered educational institutions.\n\u2022 Employers remit SDL alongside PAYE each month.",
+    sources: [{ label: "TRA \u2014 Skills Development Levy (SDL)", url: "https://www.tra.go.tz/page/skills-development-levy-sdl" }]
+  },
+  {
+    id: "cheti-cha-kodi",
+    cues: ["cheti cha kodi", "kutokuwa na deni", "tax clearance", "clearance certificate", "kibali cha kodi"],
+    sw: "Cheti cha Kutokuwa na Deni la Kodi (Tax Clearance Certificate):\n\u2022 Kinathibitisha kuwa umetimiza wajibu wako wa kodi hadi tarehe fulani.\n\u2022 Kinahitajika kwa: kuomba/kufanya upya leseni ya biashara, kushiriki zabuni za serikali, na taratibu nyingine za kiofisi.\n\u2022 Omba kupitia mfumo wa IDRAS wa TRA baada ya kuhakikisha malipo na tamko zote za kodi ziko sawa.\n\u2022 Ukiwa na deni la kodi lililobaki, cheti hakitatolewa mpaka ulipe au upange mpango wa malipo na TRA.",
+    en: "Tax Clearance Certificate:\n\u2022 Certifies that you have met your tax obligations up to a given date.\n\u2022 Needed for: applying for/renewing a business licence, bidding on government tenders, and other official procedures.\n\u2022 Apply through TRA's IDRAS system once all payments and returns are up to date.\n\u2022 If you have outstanding tax debt, the certificate won't be issued until you pay or arrange a payment plan with TRA.",
+    sources: [{ label: "TRA \u2014 Starting a Business" }]
+  },
+  {
+    id: "kodi-kupangisha-nyumba",
+    cues: [
+      "kupangisha",
+      "kodi ya pango",
+      "nyumba ya kupanga",
+      "rental income",
+      "rent tax",
+      "mpangaji",
+      "nyumba",
+      "kodi ya nyumba",
+      "ninayopangisha",
+      "napangisha",
+      "kupanga nyumba"
+    ],
+    sw: "Kodi ya Mapato ya Kupangisha (Rental Income Tax):\n\u2022 Mpangaji (anayelipa kodi ya pango) hukata 10% ya kiasi cha pango kama kodi ya zuio na kuiwasilisha TRA.\n\u2022 Kwa mwenye nyumba mkaazi ambaye kupangisha si biashara yake kuu, kodi hiyo ya zuio mara nyingi ni kodi ya MWISHO (final tax) \u2014 hahitaji kulipa zaidi.\n\u2022 Kwa mwenye nyumba asiye mkaazi, hii ni sehemu tu ya kodi inayotakiwa \u2014 analipa hadi 30% ya mapato halisi baada ya makato.\n\u2022 Hakikisha mkataba wa pango umepigwa muhuri (stempu ya 1% ya kodi ya mwaka) \u2014 mkataba usio na muhuri hauna nguvu kisheria.",
+    en: "Rental Income Tax:\n\u2022 The tenant withholds 10% of the rent as withholding tax and remits it to TRA.\n\u2022 For a resident landlord where renting isn't their main business, that withholding is often the FINAL tax \u2014 nothing more is owed.\n\u2022 For a non-resident landlord, this is only part of what's owed \u2014 up to 30% of net income after deductions applies.\n\u2022 Make sure the rental agreement is stamped (1% of annual rent stamp duty) \u2014 an unstamped agreement has no legal force.",
+    sources: [{ label: "TRA \u2014 Withholding Tax", url: "https://www.tra.go.tz/page/withholding-tax" }]
+  },
+  {
+    id: "kodi-faida-ya-mtaji",
+    cues: [
+      "faida ya mtaji",
+      "capital gains",
+      "capital gains tax",
+      "kuuza kiwanja",
+      "kuuza nyumba",
+      "kuuza hisa",
+      "kiwanja",
+      "nikiuza",
+      "niuze kiwanja",
+      "niuze nyumba"
+    ],
+    sw: "Kodi ya Faida ya Mtaji (Capital Gains Tax):\n\u2022 Si kodi tofauti \u2014 ni sehemu ya kodi ya mapato, inayotozwa faida unayopata ukiuza mali kama kiwanja, jengo, au hisa.\n\u2022 Mkaazi: 10% ya faida halisi. Asiye mkaazi: hadi 30%.\n\u2022 Hisa zilizoorodheshwa DSE zinazomilikiwa na mkaazi mara nyingi zimesamehewa.\n\u2022 Wasilisha na ulipe kabla ya/wakati wa uhamisho wa umiliki \u2014 hii huhusiana moja kwa moja na stempu ya kodi kwenye hati ya uhamisho.",
+    en: "Capital Gains Tax:\n\u2022 Not a separate tax \u2014 it's part of income tax, charged on the gain from selling an asset like land, a building, or shares.\n\u2022 Resident: 10% of the net gain. Non-resident: up to 30%.\n\u2022 DSE-listed shares held by a resident are often exempt.\n\u2022 Declare and pay before/at the point of ownership transfer \u2014 this ties directly to stamp duty on the transfer instrument.",
+    sources: [{ label: "TRA \u2014 Capital Gains Tax", url: "https://www.tra.go.tz/page/capital-gains-tax" }, { label: "Income Tax Act (Tanzania)" }]
+  },
+  {
+    id: "ukaguzi-wa-kodi",
+    cues: ["ukaguzi wa kodi", "mkaguzi wa kodi", "tax audit", "auditor", "tra wananikagua"],
+    sw: 'Ukaguzi wa Kodi (Tax Audit):\n\u2022 TRA ina haki ya kukagua kumbukumbu za biashara yako (mauzo, gharama, risiti za EFD/VFD) wakati wowote ndani ya muda uliowekwa kisheria.\n\u2022 Andaa/hifadhi kumbukumbu safi za mauzo na matumizi kila wakati \u2014 ndiyo ulinzi wako mkubwa zaidi wakati wa ukaguzi.\n\u2022 Una haki ya kuona barua rasmi ya taarifa ya ukaguzi na kujua ni vipindi/miaka gani inakaguliwa.\n\u2022 Ukitokea tathmini mpya baada ya ukaguzi na hukubaliani nayo, unaweza kuwasilisha pingamizi (angalia sehemu ya "Pingamizi na Rufaa").\n\u2022 Shirikiana kitaalamu; unaweza kutumia mshauri wa kodi aliyesajiliwa kukusaidia wakati wa ukaguzi.',
+    en: 'Tax Audit:\n\u2022 TRA has the right to examine your business records (sales, expenses, EFD/VFD receipts) within the legally set time limits.\n\u2022 Keep clean sales and expense records at all times \u2014 that is your strongest protection during an audit.\n\u2022 You have the right to a formal audit notice and to know which periods/years are being examined.\n\u2022 If a new assessment follows the audit and you disagree, you can file an objection (see "Objections & Appeals").\n\u2022 Cooperate professionally; a registered tax consultant can assist you through the audit.',
+    sources: [{ label: "Tax Administration Act, 2015 (R.E. 2019)" }]
+  },
+  {
+    id: "kuripoti-rushwa",
+    cues: ["rushwa", "takukuru", "pccb", "whistleblower", "corruption", "bribery", "afisa anaomba rushwa"],
+    sw: "Kuripoti Rushwa ya Afisa wa Kodi:\n\u2022 Rushwa katika ukusanyaji wa kodi ni kosa la jinai chini ya Sheria ya Kuzuia na Kupambana na Rushwa.\n\u2022 Ripoti kwa TAKUKURU (PCCB) kupitia namba ya dharura 113, au tovuti/ofisi zao za mikoa.\n\u2022 Sheria ya Ulinzi wa Watoa Taarifa na Mashahidi (Whistleblower and Witness Protection Act) inakupa ulinzi ukitoa taarifa kwa nia njema.\n\u2022 Huduma nyingi za TRA sasa ni za mtandaoni (Taxpayer Portal/app) hasa ili kupunguza mwingiliano wa ana kwa ana unaoweza kusababisha rushwa \u2014 tumia njia hizo pale inapowezekana.\n\u2022 Unaweza pia kuwasilisha malalamiko rasmi dhidi ya mwenendo wa afisa moja kwa moja kwa uongozi wa TRA.",
+    en: "Reporting Bribery by a Tax Official:\n\u2022 Bribery in tax collection is a criminal offence under the Prevention and Combating of Corruption Act.\n\u2022 Report to PCCB (TAKUKURU) via the emergency line 113, or their website/regional offices.\n\u2022 The Whistleblower and Witness Protection Act protects you when you report in good faith.\n\u2022 Many TRA services are now online (Taxpayer Portal/app) specifically to reduce face-to-face interactions that enable bribery \u2014 use those channels where possible.\n\u2022 You can also file a formal complaint about an officer's conduct directly with TRA management.",
+    sources: [
+      { label: "PCCB \u2014 Prevention and Combating of Corruption Bureau", ref: "Emergency line 113" },
+      { label: "Whistleblower and Witness Protection Act (Tanzania)" }
+    ]
+  },
+  {
+    id: "kodi-zanzibar",
+    cues: ["zanzibar", "zrb", "kodi zanzibar", "zanzibar revenue", "tofauti tra na zrb"],
+    sw: 'Kodi Zanzibar: TRA na ZRB (Zanzibar Revenue Board)\n\u2022 Tanzania ina "kodi za muungano" na "kodi zisizo za muungano" kwa mujibu wa Katiba.\n\u2022 TRA inakusanya kodi za MUUNGANO kwa Zanzibar pia: kodi ya mapato (Income Tax Act) na ushuru wa forodha (EAC Customs Management Act).\n\u2022 ZRB (sasa Zanzibar Revenue Authority) inakusanya kodi ZISIZO za muungano kwa Zanzibar: VAT, excise duty, na stempu ya kodi \u2014 hizi ni tofauti na zile za TRA Bara.\n\u2022 Halmashauri za Zanzibar husimamia ushuru/leseni za ndani, kama ilivyo Bara.\n\u2022 Ukiwa na biashara pande zote mbili (Bara na Zanzibar), huenda ukahitaji kujisajili taasisi zote mbili kulingana na aina ya kodi.',
+    en: `Zanzibar Taxes: TRA vs ZRB (Zanzibar Revenue Board)
+\u2022 Tanzania has "union taxes" and "non-union taxes" per the Constitution.
+\u2022 TRA collects UNION taxes for Zanzibar too: income tax (Income Tax Act) and customs duty (EAC Customs Management Act).
+\u2022 ZRB (now Zanzibar Revenue Authority) collects NON-UNION taxes for Zanzibar: VAT, excise duty, and stamp duty \u2014 these differ from TRA's Mainland versions.
+\u2022 Zanzibar's local councils administer local levies/licences, just as on the Mainland.
+\u2022 If you operate on both sides (Mainland and Zanzibar), you may need to register with both institutions depending on the tax type.`,
+    sources: [{ label: "Zanzibar Revenue Board (ZRB)", url: "https://www.zanrevenue.org" }, { label: "Constitution of the United Republic of Tanzania" }]
+  },
+  {
+    id: "e-invoicing",
+    cues: [
+      "e invoicing",
+      "e-invoicing",
+      "einvoicing",
+      "risiti za kielektroniki mtandaoni",
+      "tehama ya kodi",
+      "kuripoti kielektroniki",
+      "uripoti wa muda halisi",
+      "real time reporting"
+    ],
+    sw: "E-Invoicing (Uripoti wa Kielektroniki wa Mauzo):\n\u2022 Ni mfumo unaounganisha vifaa vya risiti (EFD/VFD) moja kwa moja na mifumo ya TRA kwa muda halisi (real-time), kupunguza uwezekano wa kuficha mauzo.\n\u2022 Lengo: kupanua wigo wa kodi kwa kuhakikisha kila muamala unaripotiwa moja kwa moja bila kusubiri tamko la mwisho wa mwezi.\n\u2022 Kwa mfanyabiashara, hii inamaanisha VFD/EFD yako lazima iwe na muunganiko sahihi wa mtandao mara kwa mara ili kutuma taarifa TRA.\n\u2022 Thibitisha matakwa mahususi ya sasa (toleo la programu, muunganiko) kwenye tovuti ya TRA kabla ya kuwekeza kwenye vifaa vipya.",
+    en: "E-Invoicing (Real-Time Sales Reporting):\n\u2022 A system that connects fiscal devices (EFD/VFD) directly to TRA in real time, reducing the ability to hide sales.\n\u2022 Goal: widen the tax base by ensuring every transaction is reported immediately, not just at month-end filing.\n\u2022 For a business, this means your VFD/EFD needs a reasonably reliable network connection to transmit data to TRA.\n\u2022 Verify the current specific requirements (software version, connectivity) on TRA's website before investing in new devices.",
+    sources: [{ label: "TRA \u2014 E-Fiscal Devices (EFD)", url: "https://www.tra.go.tz/page/know-about-e-fiscal-devices-efd" }]
+  },
+  {
+    id: "utekelezaji-kufunga-akaunti",
+    cues: [
+      "kufungwa akaunti",
+      "akaunti kufungwa",
+      "kukamata bidhaa",
+      "kutaifisha",
+      "account frozen",
+      "seizure",
+      "enforcement",
+      "wamefunga akaunti",
+      "akaunti ya benki",
+      "benki imefungwa",
+      "kufunga akaunti",
+      "mali kukamatwa"
+    ],
+    sw: 'TRA Imefunga Akaunti/Kukamata Bidhaa \u2014 Enforcement:\n\u2022 TRA ina mamlaka kisheria ya kuchukua hatua za kulazimisha ulipaji wa kodi iliyokwisha kuwa "deni la kodi" lisilobishaniwa: kufunga akaunti ya benki, kukamata bidhaa/mali, au kuzuia leseni.\n\u2022 Hatua hizi kwa kawaida huja BAADA ya taarifa/uamuzi wa awali \u2014 kama umepokea tathmini na hukupinga ndani ya siku 30, deni linakuwa la lazima kulipwa.\n\u2022 Ukiona hatua imechukuliwa bila taarifa au kimakosa, wasiliana na TRA mara moja na uonyeshe uthibitisho (risiti za malipo, pingamizi lililowasilishwa).\n\u2022 Ukiwa na pingamizi halali lililowasilishwa kwa wakati na umelipa amana inayotakiwa (1/3 au kisichobishaniwa), hilo mara nyingi husimamisha baadhi ya hatua za utekelezaji hadi uamuzi utolewe.',
+    en: "TRA Account Freeze/Seizure \u2014 Enforcement Action:\n\u2022 TRA has legal authority to enforce collection of an undisputed tax debt: freezing bank accounts, seizing goods/property, or restricting licences.\n\u2022 These actions normally follow an earlier notice/decision \u2014 if you received an assessment and didn't object within 30 days, the debt becomes enforceable.\n\u2022 If action was taken without notice or in error, contact TRA immediately with evidence (payment receipts, a filed objection).\n\u2022 A valid, timely-filed objection with the required deposit paid (1/3 or undisputed amount) often suspends certain enforcement steps pending the decision.",
+    sources: [{ label: "Tax Administration Act, 2015 (R.E. 2019)" }]
+  }
+];
+var DISCLAIMER_SW4 = "Kumbuka: haya ni maelezo ya jumla kwa elimu tu \u2014 SI ushauri rasmi wa kodi. Kwa uamuzi mahususi, wasiliana na TRA au mshauri wa kodi aliyesajiliwa.";
+var DISCLAIMER_EN4 = "Note: this is general information for education only \u2014 NOT formal tax advice. For specific decisions, consult TRA or a registered tax consultant.";
+function tokens6(s) {
+  return norm10(s).split(" ").filter(Boolean);
+}
+function score5(entry, qTokens, qNorm) {
+  let s = 0;
+  for (const c of entry.cues) {
+    if (hasCue7(qNorm, c)) s += 2;
+    else if (qTokens.includes(c)) s += 1;
+  }
+  return s;
+}
+function bestEntry5(text) {
+  const qNorm = norm10(text);
+  const qTokens = tokens6(text);
+  let best = null;
+  let bestScore = 0;
+  for (const e of KB5) {
+    const s = score5(e, qTokens, qNorm);
+    if (s > bestScore) {
+      best = e;
+      bestScore = s;
+    }
+  }
+  return best ? { entry: best, score: bestScore } : null;
+}
+var NO_MATCH_SW = "Nimeelewa kuwa hili ni swali la kodi, lakini sina taarifa mahususi kuhusu hilo bado. Jaribu kuuliza kuhusu TIN, VAT, kodi ya makadirio, EFD/VFD, pingamizi na rufaa, kodi ya zuio, SDL, stempu ya kodi, au wasiliana na TRA moja kwa moja kwa jibu sahihi.";
+var NO_MATCH_EN = "I can tell this is a tax question, but I don't have specific information on that yet. Try asking about TIN, VAT, presumptive tax, EFD/VFD, objections and appeals, withholding tax, SDL, stamp duty, or contact TRA directly for an authoritative answer.";
+var kodiExpert = {
+  id: "kodi-tra-msingi",
+  domain: "kodi",
+  label: "Kodi",
+  match(q) {
+    return cueScore7(q.text ?? "", KODI_CUES);
+  },
+  answer(q) {
+    const best = bestEntry5(q.text ?? "");
+    if (!best) {
+      return {
+        domain: "kodi",
+        expert: kodiExpert.id,
+        text: { sw: `${NO_MATCH_SW}
+
+${DISCLAIMER_SW4}`, en: `${NO_MATCH_EN}
+
+${DISCLAIMER_EN4}` },
+        confidence: "low",
+        sources: [{ label: "Akili KB \u2014 Kodi", ref: "Laetoli \xB7 KODI360" }],
+        data: { entry: "no-match", score: 0 }
+      };
+    }
+    const { entry, score: s } = best;
+    const confidence = s >= 4 ? "high" : s >= 2 ? "medium" : "low";
+    const sw = `${entry.sw}
+
+${DISCLAIMER_SW4}`;
+    const en = entry.en ? `${entry.en}
+
+${DISCLAIMER_EN4}` : void 0;
+    return {
+      domain: "kodi",
+      expert: kodiExpert.id,
+      text: en ? { sw, en } : { sw },
+      confidence,
+      sources: [...entry.sources, { label: "Akili KB \u2014 Kodi", ref: "Laetoli \xB7 KODI360" }],
+      data: { entry: entry.id, score: s }
+    };
+  }
+};
+
 // src/akili/index.ts
 var defaultExperts = [
   afyaExpert,
@@ -30352,6 +33068,10 @@ var defaultExperts = [
   //  study help / education system
   biasharaExpert,
   // small business & financial literacy
+  logistikiExpert,
+  // logistics & trade (CargoLink Rubani, vendored)
+  kodiExpert,
+  //   tax administration (TRA, KODI360)
   snilExpert,
   //   SNIL-as-tool: Swahili intent → code → execution
   jumlaExpert
@@ -30373,6 +33093,8 @@ export {
   fasihiExpert,
   jumlaExpert,
   kilimoExpert,
+  kodiExpert,
+  logistikiExpert,
   lughaExpert,
   sheriaExpert,
   snilExpert

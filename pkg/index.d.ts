@@ -1,21 +1,43 @@
 /** Languages Akili understands + answers in. sw_mtaa = colloquial/street Swahili. */
 type AkiliLang = 'sw' | 'en' | 'sw_mtaa';
 /** Knowledge domains Akili routes across. */
-type AkiliDomain = 'afya' | 'fasihi' | 'lugha' | 'sheria' | 'kilimo' | 'elimu' | 'biashara' | 'snil' | 'jumla';
+type AkiliDomain = 'afya' | 'fasihi' | 'lugha' | 'sheria' | 'kilimo' | 'elimu' | 'biashara' | 'logistiki' | 'kodi' | 'snil' | 'jumla';
 type AkiliConfidence = 'high' | 'medium' | 'low';
 interface AkiliQuery {
     /** The user's question, in Swahili or English. */
     text: string;
     /** Preferred answer language (default 'sw'). */
     lang?: AkiliLang;
-    /** Optional structured context an expert may use (e.g. patient context for afya). */
+    /**
+     * Optional structured context an expert may use (e.g. patient context for
+     * afya, or `logistics`/`memory` injected by a multi-turn AkiliSession).
+     */
     context?: Record<string, unknown>;
+}
+/**
+ * Anaphora bias the router applies on top of expert scores: when a session
+ * detects a short follow-up ("…na VAT yake?") it nudges `domain` up by `boost`
+ * so a near-tie resolves to the prior domain WITHOUT overriding a clear winner.
+ * Carried on `context.bias`; absent for one-shot asks.
+ */
+interface AkiliBias {
+    domain: AkiliDomain;
+    /** Small additive score boost applied to the prior domain (0..1). */
+    boost: number;
+    /**
+     * Score floor for the prior domain on a follow-up so it competes even when its
+     * own matcher (which can't see carried context) scored low. Kept below the
+     * "clear cue" threshold so a strong new-topic query still wins outright.
+     */
+    floor: number;
 }
 interface AkiliSource {
     /** Human label, e.g. "WHO", "NTLG 2021", "Kasuku KB", "SNIL". */
     label: string;
-    /** Optional reference/URL/citation detail. */
+    /** Optional reference/citation detail (not necessarily a URL). */
     ref?: string;
+    /** Optional clickable URL, when the source is a real linkable page. */
+    url?: string;
 }
 /** When the SNIL tool runs, the generated program + its output travels here. */
 interface AkiliSnilTrace {
@@ -64,6 +86,33 @@ interface DomainExpert {
     answer(q: AkiliQuery): AkiliAnswer | Promise<AkiliAnswer>;
 }
 
+/** One remembered turn (compact — just what later turns need to reason). */
+interface AkiliTurn {
+    domain: AkiliDomain;
+    expert: string;
+    /** The user's (trimmed) text for that turn. */
+    text: string;
+    /** The answer's topic, when the expert exposed one (e.g. logistiki). */
+    topic?: string;
+}
+/**
+ * The session-level memory carried between turns. Generic by design: `entities`
+ * is a flat string map populated from each answer's `data.entities` (+ a top-level
+ * `data.topic` when present), so it works for any domain without bespoke shapes.
+ */
+interface AkiliMemory {
+    /** Domain of the most recent answered turn. */
+    lastDomain?: AkiliDomain;
+    /** Expert id of the most recent answered turn. */
+    lastExpert?: string;
+    /** Topic of the most recent answer (when the expert exposed one). */
+    lastTopic?: string;
+    /** Accumulating entity map: country, corridor, mode, value, topic, … */
+    entities: Record<string, string>;
+    /** The last N turns, oldest first. */
+    recentTurns: AkiliTurn[];
+}
+
 interface Akili {
     /** Ask Akili. Accepts a raw string (treated as Swahili) or a structured query. */
     ask(q: AkiliQuery | string): Promise<AkiliAnswer>;
@@ -79,13 +128,20 @@ interface AkiliSession {
     ask(q: AkiliQuery | string): Promise<AkiliAnswer>;
     /** The last N exchanges, oldest first. */
     history(): AkiliExchange[];
+    /** The accumulated multi-turn memory (lastDomain, entities, recentTurns). */
+    memory(): AkiliMemory;
     /** Clear the conversation memory. */
     reset(): void;
 }
 /**
- * A cheap in-memory multi-turn session over an Akili instance. Keeps the last
- * `maxTurns` exchanges; passes prior history to experts via query.context.history
- * so context-aware experts may use it (others simply ignore it).
+ * A multi-turn session over an Akili instance. Carries a small, generic memory
+ * between turns (lastDomain/lastExpert, an accumulating entity map, the last N
+ * turns) and injects it into each query's context so experts resolve anaphoric
+ * follow-ups — e.g. "duty in Kenya" → "and the VAT there?" keeps Kenya, and
+ * "dalili za malaria" → "tiba yake?" stays in afya.
+ *
+ * Sovereign + deterministic: every decision is a pure function of prior turns +
+ * the current text. The prior `history` context is preserved for back-compat.
  */
 declare function createAkiliSession(akili: Akili, maxTurns?: number): AkiliSession;
 
@@ -121,6 +177,10 @@ declare const elimuExpert: DomainExpert;
 
 declare const biasharaExpert: DomainExpert;
 
+declare const logistikiExpert: DomainExpert;
+
+declare const kodiExpert: DomainExpert;
+
 /**
  * The default expert registry, in priority order. Order matters only for ties
  * (router breaks equal scores by registration order); jumla is the fallback so
@@ -132,4 +192,4 @@ declare const akili: Akili;
 /** One-call entry point: ask the default Akili instance. */
 declare function askAkili(q: AkiliQuery | string): Promise<AkiliAnswer>;
 
-export { type Akili, type AkiliAnswer, type AkiliConfidence, type AkiliDomain, type AkiliExchange, type AkiliLang, type AkiliQuery, type AkiliSession, type AkiliSnilTrace, type AkiliSource, type DomainExpert, afyaExpert, akili, askAkili, biasharaExpert, createAkili, createAkiliSession, defaultExperts, elimuExpert, fasihiExpert, jumlaExpert, kilimoExpert, lughaExpert, sheriaExpert, snilExpert };
+export { type Akili, type AkiliAnswer, type AkiliBias, type AkiliConfidence, type AkiliDomain, type AkiliExchange, type AkiliLang, type AkiliQuery, type AkiliSession, type AkiliSnilTrace, type AkiliSource, type DomainExpert, afyaExpert, akili, askAkili, biasharaExpert, createAkili, createAkiliSession, defaultExperts, elimuExpert, fasihiExpert, jumlaExpert, kilimoExpert, kodiExpert, logistikiExpert, lughaExpert, sheriaExpert, snilExpert };
