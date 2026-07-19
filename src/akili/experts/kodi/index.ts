@@ -7,7 +7,7 @@
 // ya zuio (WHT), stempu, SDL, cheti cha ukamilifu wa kodi, kodi ya kupangisha,
 // kodi ya faida ya mtaji, ukaguzi wa kodi, kuripoti rushwa, kodi Zanzibar, na
 // e-invoicing. Pure/deterministic TS — no external LLM, no network, works
-// fully offline. Built for KODI360 (TRA Innovation Challenge submission) —
+// fully offline. Built for KODI360, Laetoli's national tax platform for Tanzania —
 // reused here so any Laetoli product can embed the same sovereign tax
 // assistant. NOT tax advice; every answer points the user to TRA or a
 // registered tax consultant.
