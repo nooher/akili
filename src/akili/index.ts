@@ -13,6 +13,7 @@ import { kilimoExpert } from './experts/kilimo';
 import { elimuExpert } from './experts/elimu';
 import { biasharaExpert } from './experts/biashara';
 import { logistikiExpert } from './experts/logistiki';
+import { kodiExpert } from './experts/kodi';
 import type { AkiliAnswer, AkiliQuery, DomainExpert } from './types';
 
 /**
@@ -29,6 +30,7 @@ export const defaultExperts: DomainExpert[] = [
   elimuExpert, //  study help / education system
   biasharaExpert, // small business & financial literacy
   logistikiExpert, // logistics & trade (CargoLink Rubani, vendored)
+  kodiExpert, //   tax administration (TRA, KODI360)
   snilExpert, //   SNIL-as-tool: Swahili intent → code → execution
   jumlaExpert, //  greetings / about-Akili / fallback (must stay last)
 ];
@@ -53,6 +55,7 @@ export { kilimoExpert } from './experts/kilimo';
 export { elimuExpert } from './experts/elimu';
 export { biasharaExpert } from './experts/biashara';
 export { logistikiExpert } from './experts/logistiki';
+export { kodiExpert } from './experts/kodi';
 
 // Re-export the contract types.
 export * from './types';

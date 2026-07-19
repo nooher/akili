@@ -22,8 +22,8 @@ describe('package entry (akili/engine via src/node)', () => {
     expect(typeof createAkili).toBe('function');
     expect(typeof createAkiliSession).toBe('function');
     expect(Array.isArray(defaultExperts)).toBe(true);
-    // ten experts (afya, fasihi, lugha, sheria, kilimo, elimu, biashara, logistiki, snil, jumla)
-    expect(defaultExperts.length).toBe(10);
+    // eleven experts (afya, fasihi, lugha, sheria, kilimo, elimu, biashara, logistiki, kodi, snil, jumla)
+    expect(defaultExperts.length).toBe(11);
     expect(defaultExperts).toContain(afyaExpert);
     expect(defaultExperts).toContain(snilExpert);
   });

@@ -15,6 +15,7 @@ export type AkiliDomain =
   | 'elimu' //  study help / education system
   | 'biashara' //  small business & financial literacy
   | 'logistiki' //  logistics & trade (CargoLink Rubani, vendored)
+  | 'kodi' //  tax administration (TRA, KODI360)
   | 'snil' //  SNIL-as-tool: Swahili intent → code → execution
   | 'jumla'; //  general / about-Akili / fallback
 
@@ -53,8 +54,10 @@ export interface AkiliBias {
 export interface AkiliSource {
   /** Human label, e.g. "WHO", "NTLG 2021", "Kasuku KB", "SNIL". */
   label: string;
-  /** Optional reference/URL/citation detail. */
+  /** Optional reference/citation detail (not necessarily a URL). */
   ref?: string;
+  /** Optional clickable URL, when the source is a real linkable page. */
+  url?: string;
 }
 
 /** When the SNIL tool runs, the generated program + its output travels here. */
